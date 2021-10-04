@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include "pm_tiny_server.h"
 #include "log.h"
 #include "time_util.h"
@@ -5,6 +6,7 @@
 #include "assert.h"
 #include "ScopeGuard.h"
 #include "pm_tiny_funcs.h"
+#include "pm_sys.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
@@ -397,7 +399,8 @@ void install_alarm_handler() {
     sigaction(SIGALRM, &act, nullptr);
 }
 
-int open_uds_listen_fd(const std::string &sock_path) {
+int open_uds_listen_fd(const std::string &sock_path
+                       ,bool enable_abstract_namespace) {
     int sfd;
     struct sockaddr_un my_addr{};
     sfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -407,9 +410,16 @@ int open_uds_listen_fd(const std::string &sock_path) {
 
     memset(&my_addr, 0, sizeof(struct sockaddr_un));
     my_addr.sun_family = AF_UNIX;
-    strncpy(my_addr.sun_path, sock_path.c_str(),
-            sizeof(my_addr.sun_path) - 1);
-
+    socklen_t addr_length;
+    if (enable_abstract_namespace) {
+        my_addr.sun_path[0] = '\0';
+        strncpy(my_addr.sun_path + 1, sock_path.c_str(), sizeof(my_addr.sun_path) - 2);
+        addr_length = offsetof(struct sockaddr_un, sun_path) + sock_path.length() + 1;
+    } else {
+        strncpy(my_addr.sun_path, sock_path.c_str(),
+                sizeof(my_addr.sun_path) - 1);
+        addr_length = sizeof(struct sockaddr_un);
+    }
     int rc = pm_tiny::set_nonblock(sfd);
     if (rc < 0) {
         pm_tiny::logger->syscall_fatal("fcntl");
@@ -418,8 +428,7 @@ int open_uds_listen_fd(const std::string &sock_path) {
     if (rc < 0) {
         pm_tiny::logger->syscall_fatal("set_cloexec");
     }
-    if (bind(sfd, (struct sockaddr *) &my_addr,
-             sizeof(struct sockaddr_un)) == -1) {
+    if (bind(sfd, (struct sockaddr *) &my_addr,addr_length) == -1) {
         pm_tiny::logger->syscall_fatal("bind");
     }
 
@@ -475,13 +484,15 @@ void start(pm_tiny_server_t &pm_tiny_server) {
     fd_set wfds;
     int rc = 0;
     auto sock_path = pm_tiny_server.pm_tiny_sock_file;
-    unlink(sock_path.c_str());
-
+    if (!pm_tiny_server.uds_abstract_namespace) {
+        unlink(sock_path.c_str());
+    }
     rc = pm_tiny::set_sigaction(SIGPIPE, SIG_IGN);
     if (rc == -1) {
         PM_TINY_LOG_FATAL_SYS("sigaction SIGPIPE");
     }
-    int sock_fd = open_uds_listen_fd(sock_path);
+    int sock_fd = open_uds_listen_fd(sock_path,
+                                     pm_tiny_server.uds_abstract_namespace);
     rc = pm_tiny_server.parse_cfg();
     if (rc != 0) {
         exit(EXIT_FAILURE);
@@ -611,7 +622,9 @@ void start(pm_tiny_server_t &pm_tiny_server) {
                       });
         sessions.clear();
     }
-    unlink(sock_path.c_str());
+    if (!pm_tiny_server.uds_abstract_namespace) {
+        unlink(sock_path.c_str());
+    }
     PM_TINY_LOG_I("pm_tiny exit");
 }
 
@@ -739,7 +752,7 @@ static void daemonize() {
     if (i > 0) exit(0); /* parent exits */
     /* child (daemon) continues */
     setsid(); /* obtain a new process group */
-    for (i = getdtablesize() - 1; i >= 0; --i) close(i); /* close all descriptors */
+    pm_tiny::close_all_fds();/* close all descriptors */
     i = open("/dev/null", O_RDWR);
     auto rc = dup(i);
     if (rc == -1) {
@@ -854,6 +867,7 @@ int main(int argc, char *argv[]) {
     pm_tiny_server.pm_tiny_app_log_dir = pm_tiny_app_log_dir;
     pm_tiny_server.pm_tiny_app_environ_dir = pm_tiny_app_environ_dir;
     pm_tiny_server.pm_tiny_sock_file = pm_tiny_cfg->pm_tiny_sock_file;
+    pm_tiny_server.uds_abstract_namespace = pm_tiny_cfg->uds_abstract_namespace;
     start(pm_tiny_server);
     delete_lock_pid_file(lock_fp, pm_tiny_lock_file.c_str());
     return 0;

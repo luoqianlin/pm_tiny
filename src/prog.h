@@ -79,6 +79,8 @@ namespace pm_tiny {
         std::vector<std::string> envs;
         int kill_timeout_sec = 3;//3s
         std::string run_as;
+        std::vector<std::string> env_vars;
+
         const int MAX_CACHE_LOG_LEN = 4096;//4kb
         std::vector<char> cache_log;
         std::string residual_log;

@@ -87,6 +87,7 @@ namespace pm_tiny {
                 prog_info->failure_action = prog_cfg.failure_action;
                 prog_info->daemon = prog_cfg.daemon;
                 prog_info->heartbeat_timeout = prog_cfg.heartbeat_timeout;
+                prog_info->env_vars = prog_cfg.env_vars;
                 progs.push_back(prog_info.release());
             }
         }
@@ -230,6 +231,7 @@ namespace pm_tiny {
                           prog_cfg.start_timeout = p->start_timeout;
                           prog_cfg.failure_action = p->failure_action;
                           prog_cfg.heartbeat_timeout = p->heartbeat_timeout;
+                          prog_cfg.env_vars = p->env_vars;
                           prog_cfgs.push_back(prog_cfg);
 
                       });
@@ -367,6 +369,24 @@ namespace pm_tiny {
         sigset_t omask;
         /* Careful: don't be affected by a signal in vforked child */
         mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK, &omask);
+        std::vector<char *> envp;
+        envp.reserve(prog.envs.size() + prog.env_vars.size() + 5);
+        std::string app_id_env = PM_TINY_APP_NAME "=";
+        app_id_env += prog.name;
+        std::string home_dir_env = PM_TINY_HOME "=";
+        home_dir_env += this->pm_tiny_home_dir;
+        std::string socket_path = PM_TINY_SOCK_FILE "=";
+        socket_path += this->pm_tiny_sock_file;
+        std::string uds_an = PM_TINY_UDS_ABSTRACT_NAMESPACE "=";
+        if (this->uds_abstract_namespace) {
+            uds_an += "1";
+        } else {
+            uds_an += "0";
+        }
+        envp.push_back(const_cast<char *>(app_id_env.c_str()));
+        envp.push_back(const_cast<char *>(home_dir_env.c_str()));
+        envp.push_back(const_cast<char *>(socket_path.c_str()));
+        envp.push_back(const_cast<char *>(uds_an.c_str()));
         pid_t pid = vfork();
         if (pid < 0) {
             tmp_errno = errno;
@@ -396,7 +416,7 @@ namespace pm_tiny {
         } else {
             /* Reset signal handlers that were set by the parent process */
             reset_sighandlers_and_unblock_sigs();
-            /* Create a new session and make ourself the process group leader */
+            /* Create a new session and make ourselves the process group leader */
             setsid();
 #if !PM_TINY_PTY_ENABLE
             close(pipefd[0]);
@@ -412,9 +432,9 @@ namespace pm_tiny {
             close(pti.master_fd);
             int pty_fd = open(pti.slave_name, O_RDWR | O_CLOEXEC);
             if (pty_fd >= 0) {
-                dup2(pty_fd, 0);
-                dup2(pty_fd, 1);
-                dup2(pty_fd, 2);
+                dup2(pty_fd, STDIN_FILENO);
+                dup2(pty_fd, STDOUT_FILENO);
+                dup2(pty_fd, STDERR_FILENO);
                 close(pty_fd);
                 set_sane_term();
             } else {
@@ -452,23 +472,14 @@ namespace pm_tiny {
                             && i < static_cast<int>(sizeof(args) / sizeof(args[0])); i++) {
                 args[i] = (char *) prog.args[i].c_str();
             }
-            std::vector<char *> envp;
-            envp.reserve(prog.envs.size() + 4);
-            std::string app_id_env = PM_TINY_APP_NAME "=";
-            app_id_env += prog.name;
-            std::string home_dir_env = PM_TINY_HOME "=";
-            home_dir_env += this->pm_tiny_home_dir;
-            std::string socket_path = PM_TINY_SOCK_FILE "=";
-            socket_path += this->pm_tiny_sock_file;
-            envp.push_back(const_cast<char *>(app_id_env.c_str()));
-            envp.push_back(const_cast<char *>(home_dir_env.c_str()));
-            envp.push_back(const_cast<char *>(socket_path.c_str()));
-            for (const auto &env: prog.envs) {
+            auto add2envp = [&](const std::string &env) {
                 if (env.rfind("PM_TINY_", 0) == 0) {
-                    continue;
+                    return;
                 }
                 envp.push_back(const_cast<char *>(env.c_str()));
-            }
+            };
+            std::for_each(prog.env_vars.begin(), prog.env_vars.end(), add2envp);
+            std::for_each(prog.envs.begin(), prog.envs.end(), add2envp);
             envp.push_back(nullptr);
             execvpe(args[0], args, envp.data());
             failed = errno;

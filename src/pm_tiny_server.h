@@ -65,6 +65,7 @@ namespace pm_tiny {
         std::string pm_tiny_app_log_dir;
         std::string pm_tiny_app_environ_dir;
         std::string pm_tiny_sock_file;
+        bool uds_abstract_namespace;
         proglist_t pm_tiny_progs;
         std::unique_ptr<ProgDAG> progDAG;
         int server_exit = 0;

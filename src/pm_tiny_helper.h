@@ -17,6 +17,7 @@ namespace pm_tiny {
         std::string pm_tiny_prog_cfg_file;
         std::string pm_tiny_app_log_dir;
         std::string pm_tiny_app_environ_dir;
+        bool uds_abstract_namespace= false;
     };
 
     std::ostream& operator<<(std::ostream &os, const pm_tiny_config_t &config);

@@ -40,6 +40,7 @@ namespace pm_funcs {
         int heartbeat_timeout{};
         int kill_timeout_sec{};
         std::string run_as;
+        std::vector<std::string> env_vars;
 
         void read(pm_tiny::iframe_stream &ifs);
 

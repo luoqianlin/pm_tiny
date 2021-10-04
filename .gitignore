@@ -2,3 +2,7 @@
 /.idea
 /dependencies
 /.ax_build
+/cp.sh
+/cp_ax.sh
+/scp.sh
+/.build_android

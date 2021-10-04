@@ -49,6 +49,7 @@ namespace pm_tiny {
         AppClientImpl() {
             this->app_name_ = get_app_name_();
             this->pm_tiny_addr_ = get_pm_tiny_addr_();
+            this->uds_abstract_namespace_ = get_pm_tiny_uds_abstract_namespace_();
             if (this->is_enable()) {
                 this->msg_thread_start_ = true;
                 msg_thread_ = std::thread(&AppClient::AppClientImpl::send_msg_loop, this);
@@ -101,7 +102,7 @@ namespace pm_tiny {
 
         void send_msg_loop() {
             try {
-                session_ = make_session(pm_tiny_addr_);
+                session_ = make_session(pm_tiny_addr_,uds_abstract_namespace_);
                 auto app_name = get_app_name();
                 while (this->msg_thread_start_) {
                     std::unique_lock<std::mutex> lk{msg_mutex_};
@@ -143,8 +144,14 @@ namespace pm_tiny {
             return getenv(PM_TINY_SOCK_FILE);
         }
 
+        static bool get_pm_tiny_uds_abstract_namespace_() {
+            return getenv(PM_TINY_UDS_ABSTRACT_NAMESPACE) == "1";
+        }
+
         static std::unique_ptr<pm_tiny::session_t>
-        make_session(const std::string &pm_tiny_addr, long connect_timeout = 30) {
+        make_session(const std::string &pm_tiny_addr,
+                     bool uds_abstract_namespace,
+                     long connect_timeout = 30) {
             struct sockaddr_un serun{};
             int len;
             int sockfd;
@@ -154,8 +161,15 @@ namespace pm_tiny {
             }
             memset(&serun, 0, sizeof(serun));
             serun.sun_family = AF_UNIX;
-            strcpy(serun.sun_path, sock_path.c_str());
-            len = offsetof(struct sockaddr_un, sun_path) + strlen(serun.sun_path);
+            if (uds_abstract_namespace) {
+                serun.sun_path[0] = '\0';
+                strncpy(serun.sun_path + 1, sock_path.c_str(), sizeof(serun.sun_path) - 2);
+                len = offsetof(struct sockaddr_un, sun_path) + sock_path.length() + 1;
+            } else {
+                strncpy(serun.sun_path, sock_path.c_str(), sizeof(serun.sun_path) - 1);
+                len = offsetof(struct sockaddr_un, sun_path) + strlen(serun.sun_path);
+            }
+
 #if PM_TINY_CLIENT_CONNECT_TIMEOUT
             int flags = fcntl(sockfd, F_GETFL, 0);
             if (flags < 0) {
@@ -200,6 +214,7 @@ namespace pm_tiny {
         std::mutex msg_mutex_;
         std::string app_name_;
         std::string pm_tiny_addr_;
+        bool uds_abstract_namespace_;
         std::unique_ptr<pm_tiny::session_t> session_;
         std::chrono::steady_clock::time_point time_point_;
         std::queue<Message> send_msg_queue_;

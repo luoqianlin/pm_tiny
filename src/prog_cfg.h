@@ -26,6 +26,7 @@ namespace pm_tiny {
         failure_action_t failure_action = failure_action_t::SKIP;
         bool daemon = true;
         int heartbeat_timeout = -1;//The unit is second, its value <=0 means disable
+        std::vector<std::string> env_vars;
     };
     using prog_cfg_graph_t = Graph<prog_cfg_t *>;
 

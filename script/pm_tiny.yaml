@@ -4,3 +4,4 @@ pm_tiny_log_file: /var/log/pm_tiny/pm_tiny.log
 pm_tiny_prog_cfg_file: /usr/local/pm_tiny/prog.yaml
 pm_tiny_app_log_dir: /var/log/pm_tiny/logs
 pm_tiny_app_environ_dir: /usr/local/pm_tiny/environ
+pm_tiny_uds_abstract_namespace: false

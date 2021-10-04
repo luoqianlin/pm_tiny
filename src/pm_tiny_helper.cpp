@@ -17,6 +17,8 @@ namespace pm_tiny {
         os << "prog_cfg_file: " << config.pm_tiny_prog_cfg_file << std::endl;
         os << "app_log_dir: " << config.pm_tiny_app_log_dir << std::endl;
         os << "app_environ_dir: " << config.pm_tiny_app_environ_dir << std::endl;
+        os << "uds_abstract_namespace: " <<
+           (config.uds_abstract_namespace ? "Enable" : "Disable") << std::endl;
         return os;
     }
     static void remove_last_slash(std::string &dir_path) {
@@ -55,6 +57,16 @@ namespace pm_tiny {
         ASSIGIN_VARIABLE(pm_tiny_app_environ_dir);
         remove_last_slash(pm_tiny_app_log_dir);
         remove_last_slash(pm_tiny_app_environ_dir);
+        const YAML::Node abstract_namespace_node = configNode["pm_tiny_uds_abstract_namespace"];
+        if (abstract_namespace_node) {
+            s_cfg->uds_abstract_namespace = abstract_namespace_node.as<bool>();
+        } else {
+#ifdef PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT
+            s_cfg->uds_abstract_namespace = true;
+#else
+            s_cfg->uds_abstract_namespace = false;
+#endif
+        }
         s_cfg->pm_tiny_home_dir = pm_tiny_home_dir;
         s_cfg->pm_tiny_log_file = pm_tiny_log_file;
         s_cfg->pm_tiny_prog_cfg_file = pm_tiny_prog_cfg_file;
@@ -82,6 +94,7 @@ namespace pm_tiny {
         std::string pm_tiny_app_log_dir = getenv(PM_TINY_APP_LOG_DIR);
         std::string pm_tiny_app_environ_dir = getenv(PM_TINY_APP_ENVIRON_DIR);
         std::string pm_tiny_sock_file = getenv(PM_TINY_SOCK_FILE);
+        std::string pm_tiny_abstract_namespace_str = getenv(PM_TINY_UDS_ABSTRACT_NAMESPACE);
         remove_last_slash(pm_tiny_home_dir);
         remove_last_slash(pm_tiny_app_log_dir);
         remove_last_slash(pm_tiny_app_environ_dir);
@@ -98,6 +111,22 @@ namespace pm_tiny {
         REPLEACE_IF_NOT_EMPTY(pm_tiny_prog_cfg_file);
         REPLEACE_IF_NOT_EMPTY(pm_tiny_app_log_dir);
         REPLEACE_IF_NOT_EMPTY(pm_tiny_app_environ_dir);
+        bool pm_tiny_uds_abstract_namespace;
+        if (!pm_tiny_abstract_namespace_str.empty()) {
+            pm_tiny_uds_abstract_namespace =
+                    (pm_tiny_abstract_namespace_str == "1"
+                     || pm_tiny_abstract_namespace_str == "Y");
+        }else {
+            if (f_cfg) {
+                pm_tiny_uds_abstract_namespace = f_cfg->uds_abstract_namespace;
+            }else{
+#ifdef PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT
+                pm_tiny_uds_abstract_namespace = true;
+#else
+                pm_tiny_uds_abstract_namespace = false;
+#endif
+            }
+        }
         if (pm_tiny_home_dir.empty()) {
             struct passwd *pw = getpwuid(getuid());
             std::string user_homedir = pw->pw_dir;
@@ -116,7 +145,11 @@ namespace pm_tiny {
             pm_tiny_app_environ_dir = pm_tiny_home_dir + "/environ";
         }
         if (pm_tiny_sock_file.empty()) {
-            pm_tiny_sock_file = pm_tiny_home_dir + "/pm_tinyd.sock";
+            if (pm_tiny_uds_abstract_namespace) {
+                pm_tiny_sock_file = "pm_tinyd";
+            } else {
+                pm_tiny_sock_file = pm_tiny_home_dir + "/pm_tinyd.sock";
+            }
         }
         setenv(PM_TINY_HOME, pm_tiny_home_dir.c_str(), 1);
         setenv(PM_TINY_LOG_FILE, pm_tiny_log_file.c_str(), 1);
@@ -124,6 +157,7 @@ namespace pm_tiny {
         setenv(PM_TINY_APP_LOG_DIR, pm_tiny_app_log_dir.c_str(), 1);
         setenv(PM_TINY_APP_ENVIRON_DIR, pm_tiny_app_environ_dir.c_str(), 1);
         setenv(PM_TINY_SOCK_FILE, pm_tiny_sock_file.c_str(), 1);
+        setenv(PM_TINY_UDS_ABSTRACT_NAMESPACE, (pm_tiny_uds_abstract_namespace ? "1" : "0"), 1);
         std::string pm_lock_file = pm_tiny_home_dir + "/" + "pm_tiny.pid";
         auto cfg = std::make_unique<pm_tiny_config_t>();
         cfg->pm_tiny_home_dir = pm_tiny_home_dir;
@@ -133,6 +167,7 @@ namespace pm_tiny {
         cfg->pm_tiny_prog_cfg_file = pm_tiny_prog_cfg_file;
         cfg->pm_tiny_app_log_dir = pm_tiny_app_log_dir;
         cfg->pm_tiny_app_environ_dir = pm_tiny_app_environ_dir;
+        cfg->uds_abstract_namespace = pm_tiny_uds_abstract_namespace;
 //        std::cout<<*cfg<<std::endl;
         return cfg;
     }

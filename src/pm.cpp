@@ -30,11 +30,12 @@ void show_usage(int, char *argv[]) {
     fprintf(stdout, "usage: %s <command> [options]\n\n", argv[0]);
     fprintf(stdout, "- Start and add a process to the pm_tiny process list:\n\n");
     fprintf(stdout,
-            PM_TINY_ANSI_COLOR_CYAN "$ pm start \"node test.js arg0 arg1\""
-            " --name app_name [--log]" PM_TINY_ANSI_COLOR_REST "\n\n");
+            PM_TINY_ANSI_COLOR_CYAN "$ %s start \"node test.js arg0 arg1\""
+            " --name app_name [--log]" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout, "other options:\n"
                     "\t--kill_timeout <seconds>\n"
                     "\t--user <user>\n"
+                    "\t--env_var <key=value>\n"
                     "\t--depends_on <other_apps>\n"
                     "\t--start_timeout <seconds>\n"
                     "\t--failure_action <skip|restart|reboot>\n"
@@ -42,22 +43,22 @@ void show_usage(int, char *argv[]) {
                     "\t--no_daemon\n"
                     "\t--log\n\n");
     fprintf(stdout, "- Show the process list:\n\n");
-    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ pm ls" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ %s ls" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout, "- Show the process output:\n\n");
-    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ pm log app_name" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ %s log app_name" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout, "- Stop and delete a process from the pm process list:\n\n");
-    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ pm delete app_name" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ %s delete app_name" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout, "- Stop, start and restart a process from the process list:\n\n");
-    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ pm stop app_name\n$ pm start app_name [--log]\n"
-                    "$ pm restart app_name [--log]" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ %s stop app_name\n$ %s start app_name [--log]\n"
+                    "$ %s restart app_name [--log]" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0],argv[0],argv[0]);
     fprintf(stdout, "- Show the process configuration:\n\n");
-    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ pm inspect app_name" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ %s inspect app_name" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout, "- Save the process configuration:\n\n");
-    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ pm save" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout, PM_TINY_ANSI_COLOR_CYAN "$ %s save" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout,"- Reload the configuration file:\n\n");
-    fprintf(stdout,PM_TINY_ANSI_COLOR_CYAN "$ pm reload" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout,PM_TINY_ANSI_COLOR_CYAN "$ %s reload" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
     fprintf(stdout,"- Shut down pm_tiny service:\n\n");
-    fprintf(stdout,PM_TINY_ANSI_COLOR_CYAN "$ pm quit" PM_TINY_ANSI_COLOR_REST "\n\n");
+    fprintf(stdout,PM_TINY_ANSI_COLOR_CYAN "$ %s quit" PM_TINY_ANSI_COLOR_REST "\n\n",argv[0]);
 }
 
 struct cmd_opt_t {
@@ -133,6 +134,7 @@ int main(int argc, char *argv[]) {
         std::string start_timeout_str;
         std::string failure_action_str;
         std::string heartbeat_timeout_str;
+        std::vector<std::string> env_vars;
 
         std::vector<std::string> depends_on;
         int start_timeout = 0;
@@ -150,13 +152,14 @@ int main(int argc, char *argv[]) {
         static struct option long_options[] = {
                 {"name",              required_argument, nullptr, 0},
                 {"kill_timeout",      required_argument, nullptr, 0},
-                {"user",            required_argument, nullptr, 0},
+                {"user",              required_argument, nullptr, 0},
                 {"depends_on",        required_argument, nullptr, 0},
                 {"start_timeout",     required_argument, nullptr, 0},
                 {"failure_action",    required_argument, nullptr, 0},
                 {"heartbeat_timeout", required_argument, nullptr, 0},
                 {"no_daemon",         no_argument,       nullptr, 0},
                 {"log",               no_argument,       nullptr, 0},
+                {"env_var",           required_argument, nullptr, 0},
                 {nullptr, 0,                             nullptr, 0}
         };
         auto uid = getuid();
@@ -182,6 +185,8 @@ int main(int argc, char *argv[]) {
                         show_log = true;
                     } else if (option_index == 7) {
                         daemon = 0;
+                    } else if (option_index == 9) {
+                        env_vars.emplace_back(optarg);
                     } else {
                         *options[option_index] = optarg;
                     }
@@ -223,6 +228,7 @@ int main(int argc, char *argv[]) {
         progcfg.daemon = daemon;
         progcfg.heartbeat_timeout = heartbeat_timeout;
         progcfg.command = cmd_opt.argv[1];
+        progcfg.env_vars = env_vars;
         start_proc(*cmd_opt.session, progcfg, show_log);
         return nullptr;
     };
@@ -385,8 +391,14 @@ int main(int argc, char *argv[]) {
     }
     memset(&serun, 0, sizeof(serun));
     serun.sun_family = AF_UNIX;
-    strcpy(serun.sun_path, sock_path.c_str());
-    len = offsetof(struct sockaddr_un, sun_path) + strlen(serun.sun_path);
+    if (pm_tiny_cfg->uds_abstract_namespace) {
+        serun.sun_path[0] = '\0';
+        strncpy(serun.sun_path + 1, sock_path.c_str(), sizeof(serun.sun_path) - 2);
+        len = offsetof(struct sockaddr_un, sun_path) + sock_path.length() + 1;
+    } else {
+        strncpy(serun.sun_path, sock_path.c_str(), sizeof(serun.sun_path) - 1);
+        len = offsetof(struct sockaddr_un, sun_path) + strlen(serun.sun_path);
+    }
     if (connect(sockfd, (struct sockaddr *) &serun, len) < 0) {
         perror("connect error");
         exit(1);

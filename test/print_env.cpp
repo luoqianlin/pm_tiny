@@ -8,7 +8,7 @@ extern char **environ;
 
 int main(int argc, char *argv[]) {
     fprintf(stderr, "---print before---\n\n");
-    for (char **env = environ; *env != 0; env++) {
+    for (char **env = environ; *env != nullptr; env++) {
         char *thisEnv = *env;
         fprintf(stderr, "%s\n", thisEnv);
     }

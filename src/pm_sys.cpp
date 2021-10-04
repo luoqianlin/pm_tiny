@@ -14,6 +14,7 @@
 #include <pwd.h>
 #include <stdlib.h>
 #include <memory>
+#include <dirent.h>
 
 
 #include "log.h"
@@ -234,12 +235,16 @@ namespace pm_tiny {
             }
             return -1;
         }
-        passwd_.pw_dir = pwd.pw_dir;
-        passwd_.pw_gecos = pwd.pw_gecos;
+
+        //fix in android
+        // pwd.pw_dir:/,pwd.pw_gecos:(null),pwd.pw_name:root,pwd.pw_passwd:(null),pwd.pw_shell:/bin/sh
+#define ASSIGN_CHECK_NULL(str) (str)==nullptr ? "":(str)
+        passwd_.pw_dir = ASSIGN_CHECK_NULL(pwd.pw_dir);
+        passwd_.pw_gecos = ASSIGN_CHECK_NULL(pwd.pw_gecos);
         passwd_.pw_gid = pwd.pw_gid;
-        passwd_.pw_name = pwd.pw_name;
-        passwd_.pw_passwd = pwd.pw_passwd;
-        passwd_.pw_shell = pwd.pw_shell;
+        passwd_.pw_name = ASSIGN_CHECK_NULL(pwd.pw_name);
+        passwd_.pw_passwd = ASSIGN_CHECK_NULL(pwd.pw_passwd);
+        passwd_.pw_shell = ASSIGN_CHECK_NULL(pwd.pw_shell);
         passwd_.pw_uid = pwd.pw_uid;
         return 0;
     }
@@ -302,5 +307,26 @@ namespace pm_tiny {
 //            exit(1);
             kill(getpid(),SIGTERM);
         }
+    }
+
+    void close_all_fds() {
+        DIR *dir = opendir("/proc/self/fd");
+        if (!dir) {
+            perror("opendir");
+            return;
+        }
+
+        struct dirent *entry;
+        while ((entry = readdir(dir))) {
+            int fd;
+            // Attempt to convert the name to a file descriptor
+            if (sscanf(entry->d_name, "%d", &fd) == 1) {
+                if (fd != dirfd(dir)) { // Don't close the directory handle itself
+                    close(fd);
+                }
+            }
+        }
+
+        closedir(dir);
     }
 }

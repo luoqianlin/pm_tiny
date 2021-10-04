@@ -46,6 +46,7 @@ namespace pm_tiny {
             prop["name"] = cfg.name;
             prop["cwd"] = cfg.cwd;
             prop["command"] = cfg.command;
+            prop["env_vars"] = cfg.env_vars;
             prop["kill_timeout_s"] = cfg.kill_timeout_s;
             prop["user"] = cfg.run_as;
             prop["depends_on"] = cfg.depends_on;
@@ -174,6 +175,19 @@ namespace pm_tiny {
                         }
                     } else {
                         PM_TINY_LOG_E("%s depends_on wrong type, must be a scalar or sequence",
+                                      prog_cfg.name.c_str());
+                    }
+                }
+                auto env_vars_node = prop["env_vars"];
+                if (env_vars_node) {
+                    if (env_vars_node.IsScalar()) {
+                        prog_cfg.env_vars.push_back(env_vars_node.as<std::string>());
+                    } else if (env_vars_node.IsSequence()) {
+                        for (auto &&n: env_vars_node) {
+                            prog_cfg.env_vars.push_back(n.as<std::string>());
+                        }
+                    } else {
+                        PM_TINY_LOG_E("%s env_vars wrong type, must be a scalar or sequence",
                                       prog_cfg.name.c_str());
                     }
                 }

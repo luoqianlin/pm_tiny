@@ -32,6 +32,7 @@
 
 #define PM_TINY_DEFAULT_CFG_FILE "/usr/local/pm_tiny/pm_tiny.yaml"
 #define PM_TINY_APP_NAME "PM_TINY_APP_NAME"
+#define PM_TINY_UDS_ABSTRACT_NAMESPACE "PM_TINY_UDS_ABSTRACT_NAMESPACE"
 
 #define PM_TINY_EXPORTS __attribute__ ((visibility ("default")))
 

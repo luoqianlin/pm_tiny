@@ -261,6 +261,11 @@ namespace pm_funcs {
         pm_tiny::fappend_value(*f, static_cast<pm_tiny::failure_action_underlying_t>(prog_cfg.failure_action));
         pm_tiny::fappend_value(*f, prog_cfg.daemon);
         pm_tiny::fappend_value(*f, prog_cfg.heartbeat_timeout);
+        pm_tiny::fappend_value(*f, static_cast<int>(prog_cfg.env_vars.size()));
+        std::for_each(prog_cfg.env_vars.begin(), prog_cfg.env_vars.end(),
+                      [&](const auto &env_var) {
+                          pm_tiny::fappend_value(*f, env_var);
+                      });
         session.write_frame(f, 1);
         auto rf = session.read_frame(1);
         if (rf) {

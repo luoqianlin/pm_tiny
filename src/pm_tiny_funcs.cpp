@@ -114,6 +114,13 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
     ifs >> start_timeout;
     ifs >> failure_action_underly;
     ifs >> daemon >> heartbeat_timeout;
+    std::vector<std::string> env_vars;
+    int env_var_count = 0;
+    ifs >> env_var_count;
+    env_vars.resize(env_var_count);
+    for (int i = 0; i < env_var_count; i++) {
+        ifs >> env_vars[i];
+    }
 //   std::cout << "name:`" + name << "` cwd:`" << cwd << "` command:`" << command
 //   << "` local_resolved:" << local_resolved << std::endl;
 //    PM_TINY_LOG_D("run_as:%s",run_as.c_str());
@@ -129,6 +136,7 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
         prog->failure_action = static_cast<pm_tiny::failure_action_t>(failure_action_underly);
         prog->daemon = (daemon != 0);
         prog->heartbeat_timeout = heartbeat_timeout;
+        prog->env_vars = env_vars;
     }
     if (iter == pm_tiny_progs.end()) {
         if (!prog) {
@@ -168,7 +176,8 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
                 pm_tiny::fappend_value(*wf, "The cwd or command or environ or depends_on has changed,"
                                             " please run the delete operation first");
             } else {
-                _p->envs = envs;
+                //bug!!! the program exists and does not use the environment variables passed in
+//                _p->envs = envs;
                 int rc = pm_tiny_server.start_prog(_p);
                 if (rc == -1) {
                     std::string errmsg(strerror(errno));

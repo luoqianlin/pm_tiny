@@ -59,6 +59,7 @@ namespace pm_tiny {
     int  tcsetattr_stdin_TCSANOW(const struct ::termios *tp);
 
     void process_reboot();
+    void close_all_fds();
 }
 
 #endif //PM_TINY_PM_SYS_H
