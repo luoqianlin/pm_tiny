@@ -11,6 +11,11 @@
 namespace pm_tiny{
     extern std::unique_ptr<logger_t> logger;
     int initialize();
+    inline std::string get_error_msg(){
+        char buf[50];
+        strerror_r(errno,buf,sizeof(buf));
+        return buf;
+    }
 }
 
 #define PM_TINY_LOG_E(fmt, ...)         pm_tiny::logger->error("[%s:%d %s] " fmt ,PM_TINY_SHORT_FILE,__LINE__, __func__, ##__VA_ARGS__)

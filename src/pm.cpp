@@ -15,6 +15,7 @@
 #include <string>
 #include <numeric>
 #include <getopt.h>
+#include <string>
 #include "session.h"
 #include "pm_sys.h"
 #include "pm_tiny_helper.h"
@@ -40,6 +41,9 @@ void show_usage(int, char *argv[]) {
                     "\t--start_timeout <seconds>\n"
                     "\t--failure_action <skip|restart|reboot>\n"
                     "\t--heartbeat_timeout <seconds>\n"
+                    #ifdef __ANDROID__
+                    "\t--oom_score_adj <-1000-1000>\n"
+                    #endif
                     "\t--no_daemon\n"
                     "\t--log\n\n");
     fprintf(stdout, "- Show the process list:\n\n");
@@ -134,6 +138,7 @@ int main(int argc, char *argv[]) {
         std::string start_timeout_str;
         std::string failure_action_str;
         std::string heartbeat_timeout_str;
+        int oom_score_adj = 0;
         std::vector<std::string> env_vars;
 
         std::vector<std::string> depends_on;
@@ -160,6 +165,7 @@ int main(int argc, char *argv[]) {
                 {"no_daemon",         no_argument,       nullptr, 0},
                 {"log",               no_argument,       nullptr, 0},
                 {"env_var",           required_argument, nullptr, 0},
+                {"oom_score_adj",     required_argument, nullptr, 0},
                 {nullptr, 0,                             nullptr, 0}
         };
         auto uid = getuid();
@@ -187,6 +193,8 @@ int main(int argc, char *argv[]) {
                         daemon = 0;
                     } else if (option_index == 9) {
                         env_vars.emplace_back(optarg);
+                    } else if (option_index == 10) {
+                        oom_score_adj = atoi(optarg);
                     } else {
                         *options[option_index] = optarg;
                     }
@@ -229,6 +237,7 @@ int main(int argc, char *argv[]) {
         progcfg.heartbeat_timeout = heartbeat_timeout;
         progcfg.command = cmd_opt.argv[1];
         progcfg.env_vars = env_vars;
+        progcfg.oom_score_adj = oom_score_adj;
         start_proc(*cmd_opt.session, progcfg, show_log);
         return nullptr;
     };

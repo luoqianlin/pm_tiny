@@ -97,6 +97,7 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
     int daemon;
     int heartbeat_timeout;
     int show_log = 0;
+    int oom_score_adj;
     ifs >> name >> cwd >> command >> local_resolved >> env_num;
     std::vector<std::string> envs;
     envs.resize(env_num);
@@ -113,7 +114,7 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
     }
     ifs >> start_timeout;
     ifs >> failure_action_underly;
-    ifs >> daemon >> heartbeat_timeout;
+    ifs >> daemon >> heartbeat_timeout >> oom_score_adj;
     std::vector<std::string> env_vars;
     int env_var_count = 0;
     ifs >> env_var_count;
@@ -136,6 +137,7 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
         prog->failure_action = static_cast<pm_tiny::failure_action_t>(failure_action_underly);
         prog->daemon = (daemon != 0);
         prog->heartbeat_timeout = heartbeat_timeout;
+        prog->oom_score_adj = oom_score_adj;
         prog->env_vars = env_vars;
     }
     if (iter == pm_tiny_progs.end()) {
@@ -245,6 +247,7 @@ void handle_cmd_inspect(pm_tiny::pm_tiny_server_t &pm_tiny_server,
         pm_tiny::fappend_value(*f, prog_info->heartbeat_timeout);
         pm_tiny::fappend_value(*f, prog_info->kill_timeout_sec);
         pm_tiny::fappend_value(*f, prog_info->run_as);
+        pm_tiny::fappend_value(*f,prog_info->oom_score_adj);
         session->write_frame(f);
     }
 }

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
-project(pm_tiny VERSION 1.1.2 LANGUAGES C CXX)
+project(pm_tiny VERSION 1.1.3 LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 
@@ -26,7 +26,7 @@ message(STATUS "PM_TINY_SANITIZER_ENABLE:${PM_TINY_SANITIZER_ENABLE}")
 include(FetchContent)
 
 FetchContent_Declare(yaml-cpp
-        URL https://sansi-share.s3.cn-northwest-1.amazonaws.com.cn/libs/yaml-cpp-yaml-cpp-0.7.0.tar.gz
+        URL https://files.sansi.net/libs/yaml-cpp-yaml-cpp-0.7.0.tar.gz
         DOWNLOAD_DIR ${CMAKE_HOME_DIRECTORY}/dependencies
 )
 FetchContent_MakeAvailable(yaml-cpp)
@@ -44,6 +44,8 @@ add_executable(pm_tiny src/pm_tiny.cpp src/pm_tiny_server.cpp
         src/log.h src/time_util.cpp src/log.cpp src/string_utils.cpp
         src/globals.cpp
         src/pm_tiny_funcs.cpp
+        src/android_lmkd.cpp
+        src/pm_tiny_utility.cpp
 )
 
 add_compile_definitions(PM_TINY_VERSION="${PROJECT_VERSION}" PM_TINY_DEBUG)
@@ -100,7 +102,7 @@ endif ()
 
 
 add_subdirectory(sdk)
-add_subdirectory(test)
+#add_subdirectory(test)
 
 install(TARGETS pm_tiny pm
         CONFIGURATIONS Release

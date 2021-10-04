@@ -7,13 +7,11 @@
 #include "ScopeGuard.h"
 #include "pm_tiny_funcs.h"
 #include "pm_sys.h"
+#include "android_lmkd.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
 using pm_tiny_server_t = pm_tiny::pm_tiny_server_t;
-
-
-void kill_prog(proglist_t &progs);
 
 size_t get_living_processes_count(proglist_t &pm_tiny_progs);
 
@@ -75,37 +73,7 @@ static void check_delayed_exit_sig(pm_tiny_server_t &tiny_server) {
     }
 }
 
-static bool xx_kill_1(prog_ptr_t &p, int signo) {
-    bool find = false;
-    if (p->pid != -1) {
-        find = true;
-//        logger->debug("kill %s(%d)", p->name.c_str(), p->pid);
-        int rt = kill(p->pid, signo);
-        if (rt == -1) {
-            PM_TINY_LOG_E_SYS("kill");
-        }
-    }
-    return find;
-}
-
-bool xx_wait_1(prog_ptr_t &p, int options) {
-    bool find = false;
-    if (p->pid != -1) {
-        int wstatus;
-        int rc = pm_tiny::safe_waitpid(p->pid, &wstatus, options);
-        if (rc == p->pid) {
-//          logger->debug("waitpid %s(%d)", p->name.c_str(), p->pid);
-            p->last_wstatus = wstatus;
-            p->pid = -1;
-            p->state = PM_TINY_PROG_STATE_STOPED;
-        } else {
-            find = true;
-        }
-    }
-    return find;
-};
-
-void kill_prog(prog_ptr_t prog) {
+/*void kill_prog(prog_ptr_t prog) {
     bool find = xx_kill_1(prog, SIGTERM);
     if (find) {
         pm_tiny::sleep_waitfor(prog->kill_timeout_sec, [&find, &prog]() {
@@ -122,54 +90,9 @@ void kill_prog(prog_ptr_t prog) {
         }
     }
     prog->close_fds();
-}
+}*/
 
-void kill_prog(proglist_t &progs) {
-    if (progs.empty())return;
-    auto xx_kill = [](proglist_t &progs, int signo) {
-        bool find = false;
-        for (auto iter = std::begin(progs); iter != std::end(progs); iter++) {
-            auto p = *iter;
-            auto f = xx_kill_1(p, signo);
-            find = f || find;
-        }
-        return find;
-    };
-    auto xx_wait = [](proglist_t &progs, int options) {
-        bool find = false;
-        for (auto iter = std::begin(progs); iter != std::end(progs); iter++) {
-            auto p = *iter;
-            auto f = xx_wait_1(p, options);
-            find = f || find;
-        }
-        return find;
-    };
-    bool find = xx_kill(progs, SIGTERM);
-    if (find) {
-        auto max_iter = std::max_element(progs.begin(), progs.end(),
-                                         [](const prog_ptr_t &p1, const prog_ptr_t &p2) {
-                                             return p1->kill_timeout_sec < p2->kill_timeout_sec;
-                                         });
-        auto kill_timeout_sec = (*max_iter)->kill_timeout_sec;
-        pm_tiny::sleep_waitfor(kill_timeout_sec, [&]() {
-            find = xx_wait(progs, WNOHANG);
-            return !find;
-        });
-        if (find) {
-            pm_tiny::logger->debug("force kill");
-            xx_kill(progs, SIGKILL);
-            pm_tiny::sleep_waitfor(1, [&]() {
-                find = xx_wait(progs, 0);
-                return !find;
-            });
-        }
-    }
-    std::for_each(std::begin(progs), std::end(progs),
-                  [](prog_ptr_t &prog) {
-                      prog->close_fds();
-                      prog->set_state(PM_TINY_PROG_STATE_STOPED);
-                  });
-}
+
 
 /*
  * 检查是否有子进程退出，如果有则回收子进程空间(waitpid)
@@ -197,7 +120,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                     auto now_ms = p->update_count_timer();
                     auto life_time = now_ms - p->last_startup_ms;
                     p->last_wstatus = wstatus;
-                    p->close_fds();
+                    p->close_fds(tiny_server.lmkdFd);
                     if (p->state == PM_TINY_PROG_STATE_REQUEST_STOP ||
                         p->state == PM_TINY_PROG_STATE_REQUEST_DELETE) {
                         penddingtask_progs.push_back(p);
@@ -611,7 +534,7 @@ void start(pm_tiny_server_t &pm_tiny_server) {
         PM_TINY_LOG_FATAL_SYS("sigprocmask");
     }
     auto &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
-    kill_prog(pm_tiny_progs);
+    pm_tiny_server.kill_all_prog();
     delete_proglist(pm_tiny_progs);
     pm_tiny_progs.clear();
     close(sock_fd);
@@ -868,6 +791,11 @@ int main(int argc, char *argv[]) {
     pm_tiny_server.pm_tiny_app_environ_dir = pm_tiny_app_environ_dir;
     pm_tiny_server.pm_tiny_sock_file = pm_tiny_cfg->pm_tiny_sock_file;
     pm_tiny_server.uds_abstract_namespace = pm_tiny_cfg->uds_abstract_namespace;
+    try {
+        pm_tiny_server.lmkdFd = pm_tiny::connect_lmkd();
+    } catch (const std::exception &ex) {
+        PM_TINY_LOG_E("connect lmkd error:%s", ex.what());
+    }
     start(pm_tiny_server);
     delete_lock_pid_file(lock_fp, pm_tiny_lock_file.c_str());
     return 0;

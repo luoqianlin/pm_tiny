@@ -29,7 +29,8 @@ namespace pm_tiny {
         os << "start_timeout:" << prog_cfg.start_timeout << std::endl;
         os << "failure_action:" << prog_cfg.failure_action << std::endl;
         os << "daemon:" << std::boolalpha << prog_cfg.daemon << std::endl;
-        os << "heartbeat_timeout:" << prog_cfg.heartbeat_timeout;
+        os << "heartbeat_timeout:" << prog_cfg.heartbeat_timeout << std::endl;
+        os << "oom_score_adj:" << prog_cfg.oom_score_adj;
         return os;
     }
 
@@ -54,6 +55,9 @@ namespace pm_tiny {
             prop["failure_action"] = failure_action_to_str(cfg.failure_action);
             prop["daemon"] = cfg.daemon;
             prop["heartbeat_timeout"] = cfg.heartbeat_timeout;
+#ifdef __ANDROID__
+            prop["oom_score_adj"] = cfg.oom_score_adj;
+#endif
             rootNode.push_back(prop);
             std::stringstream env_ss;
             for (auto &env: cfg.envs) {
@@ -212,6 +216,10 @@ namespace pm_tiny {
                 auto heartbeat_timeout_node = prop["heartbeat_timeout"];
                 if (heartbeat_timeout_node) {
                     prog_cfg.heartbeat_timeout = heartbeat_timeout_node.as<int>();
+                }
+                auto oom_score_adj_node=prop["oom_score_adj"];
+                if (oom_score_adj_node) {
+                    prog_cfg.oom_score_adj = oom_score_adj_node.as<int>();
                 }
                 prog_cfg.envs = load_app_environ(prog_cfg.name, app_environ_dir);
                 prog_cfgs.push_back(prog_cfg);

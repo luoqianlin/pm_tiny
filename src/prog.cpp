@@ -8,6 +8,7 @@
 #include "pm_tiny_server.h"
 #include "ANSI_color.h"
 #include "unordered_map"
+#include "android_lmkd.h"
 
 
 namespace pm_tiny {
@@ -90,12 +91,15 @@ namespace pm_tiny {
      * 监管的程序运行结束后会关闭pipefd,
      * select会监听到pipefd关闭进而关闭pipfd和对应的日志文件fd
      * */
-    void prog_info_t::close_fds() {
+    void prog_info_t::close_fds(const CloseableFd& lmkd) {
         for (int i = 0; i < 2; i++) {
             if (this->rpipefd[i] != -1
                 && this->logfile_fd[i] != -1) {
                 read_pipe(i, 1);
             }
+        }
+        if (this->pid != -1 && lmkd) {
+            cmd_procremove(lmkd.fd_,this->pid);
         }
         write_prog_exit_message();
         this->close_pipefds();

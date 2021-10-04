@@ -8,6 +8,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <algorithm>
+#include "android_lmkd.h"
 
 namespace pm_tiny {
 
@@ -86,6 +87,7 @@ namespace pm_tiny {
                 prog_info->start_timeout = prog_cfg.start_timeout;
                 prog_info->failure_action = prog_cfg.failure_action;
                 prog_info->daemon = prog_cfg.daemon;
+                prog_info->oom_score_adj = prog_cfg.oom_score_adj;
                 prog_info->heartbeat_timeout = prog_cfg.heartbeat_timeout;
                 prog_info->env_vars = prog_cfg.env_vars;
                 progs.push_back(prog_info.release());
@@ -232,6 +234,7 @@ namespace pm_tiny {
                           prog_cfg.failure_action = p->failure_action;
                           prog_cfg.heartbeat_timeout = p->heartbeat_timeout;
                           prog_cfg.env_vars = p->env_vars;
+                          prog_cfg.oom_score_adj = p->oom_score_adj;
                           prog_cfgs.push_back(prog_cfg);
 
                       });
@@ -333,7 +336,7 @@ namespace pm_tiny {
 
     void pm_tiny_server_t::close_fds() {
         for (auto &prog_info: pm_tiny_progs) {
-            prog_info->close_fds();
+            prog_info->close_fds(lmkdFd);
         }
     }
 
@@ -412,6 +415,9 @@ namespace pm_tiny {
             prog.rpipefd[0] = pti.master_fd;
 #endif
             prog.last_startup_ms = pm_tiny::time::gettime_monotonic_ms();
+            if (lmkdFd) {
+                lmk_procprio(this->lmkdFd.fd_, pid, get_uid_by_pid(pid), prog.oom_score_adj);
+            }
             PM_TINY_LOG_I("startup `%s` pid:%d\n", prog.name.c_str(), pid);
         } else {
             /* Reset signal handlers that were set by the parent process */
@@ -673,5 +679,82 @@ namespace pm_tiny {
 
     bool pm_tiny_server_t::is_exiting() const {
         return this->server_exit != 0;
+    }
+
+    static bool xx_kill_1(prog_ptr_t &p, int signo) {
+        bool find = false;
+        if (p->pid != -1) {
+            find = true;
+//        logger->debug("kill %s(%d)", p->name.c_str(), p->pid);
+            int rt = kill(p->pid, signo);
+            if (rt == -1) {
+                PM_TINY_LOG_E_SYS("kill");
+            }
+        }
+        return find;
+    }
+
+    bool xx_wait_1(prog_ptr_t &p, int options) {
+        bool find = false;
+        if (p->pid != -1) {
+            int wstatus;
+            int rc = pm_tiny::safe_waitpid(p->pid, &wstatus, options);
+            if (rc == p->pid) {
+//          logger->debug("waitpid %s(%d)", p->name.c_str(), p->pid);
+                p->last_wstatus = wstatus;
+                p->pid = -1;
+                p->state = PM_TINY_PROG_STATE_STOPED;
+            } else {
+                find = true;
+            }
+        }
+        return find;
+    };
+    void pm_tiny_server_t::kill_all_prog() {
+        proglist_t &progs = this->pm_tiny_progs;
+        if (progs.empty())return;
+        auto xx_kill = [](proglist_t &progs, int signo) {
+            bool find = false;
+            for (auto iter = std::begin(progs); iter != std::end(progs); iter++) {
+                auto p = *iter;
+                auto f = xx_kill_1(p, signo);
+                find = f || find;
+            }
+            return find;
+        };
+        auto xx_wait = [](proglist_t &progs, int options) {
+            bool find = false;
+            for (auto iter = std::begin(progs); iter != std::end(progs); iter++) {
+                auto p = *iter;
+                auto f = xx_wait_1(p, options);
+                find = f || find;
+            }
+            return find;
+        };
+        bool find = xx_kill(progs, SIGTERM);
+        if (find) {
+            auto max_iter = std::max_element(progs.begin(), progs.end(),
+                                             [](const prog_ptr_t &p1, const prog_ptr_t &p2) {
+                                                 return p1->kill_timeout_sec < p2->kill_timeout_sec;
+                                             });
+            auto kill_timeout_sec = (*max_iter)->kill_timeout_sec;
+            pm_tiny::sleep_waitfor(kill_timeout_sec, [&]() {
+                find = xx_wait(progs, WNOHANG);
+                return !find;
+            });
+            if (find) {
+                pm_tiny::logger->debug("force kill");
+                xx_kill(progs, SIGKILL);
+                pm_tiny::sleep_waitfor(1, [&]() {
+                    find = xx_wait(progs, 0);
+                    return !find;
+                });
+            }
+        }
+        std::for_each(std::begin(progs), std::end(progs),
+                      [&](prog_ptr_t &prog) {
+                          prog->close_fds(this->lmkdFd);
+                          prog->set_state(PM_TINY_PROG_STATE_STOPED);
+                      });
     }
 }

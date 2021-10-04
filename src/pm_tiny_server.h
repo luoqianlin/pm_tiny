@@ -42,6 +42,7 @@
 #include "frame_stream.hpp"
 #include "procinfo.h"
 #include "prog.h"
+#include "pm_tiny_utility.h"
 
 namespace pm_tiny {
     constexpr const char *pm_tiny_version = PM_TINY_VERSION;
@@ -65,6 +66,7 @@ namespace pm_tiny {
         std::string pm_tiny_app_log_dir;
         std::string pm_tiny_app_environ_dir;
         std::string pm_tiny_sock_file;
+        CloseableFd lmkdFd;
         bool uds_abstract_namespace;
         proglist_t pm_tiny_progs;
         std::unique_ptr<ProgDAG> progDAG;
@@ -129,6 +131,8 @@ namespace pm_tiny {
         bool is_reloading() const;
 
         bool is_exiting() const;
+
+        void kill_all_prog();
 
     private:
         proglist_t spawn0(proglist_t& start_progs);
