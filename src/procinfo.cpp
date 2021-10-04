@@ -60,7 +60,7 @@ namespace pm_tiny {
                 char _exepath[PATH_MAX];
                 memset(_exepath, 0, sizeof(_exepath));
                 snprintf(path, sizeof(path), "%s/%d/exe",procdir_path, pid);
-                size_t rc = readlink(path, _exepath, sizeof(_exepath));
+                auto rc = readlink(path, _exepath, sizeof(_exepath));
                 if (rc != -1) {
                     procinfo.exe_path = std::string(_exepath);
                 }

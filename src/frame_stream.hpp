@@ -6,12 +6,17 @@
 #define PM_TINY_FRAME_STREAM_HPP
 
 #include <utility>
-
-#include "session.h"
+#include <vector>
+#include <map>
+#include <memory.h>
+#include <stdexcept>
+#include <string>
+#include <memory>
 
 namespace pm_tiny {
 
     constexpr uint8_t frame_delimiter = '\n';
+    constexpr size_t frame_max_length = 4 * (1 << 20);//4M
     using byte_t = uint8_t;
     using frame_t = std::vector<byte_t>;
 
@@ -87,7 +92,38 @@ namespace pm_tiny {
         std::copy(str.begin(), str.end(), std::back_inserter(f));
     }
 
-    using frame_ptr_t = std::shared_ptr<frame_t>;
+    using frame_ptr_t = std::unique_ptr<frame_t>;
+
+    inline std::vector<frame_ptr_t> str_to_frames(int msg_type, const std::string &msg_content) {
+        std::vector<frame_ptr_t> frames;
+        auto frame_size = frame_max_length >> 1;
+        if (msg_content.size() <= frame_size) {
+            auto wf = std::make_unique<pm_tiny::frame_t>();
+            pm_tiny::fappend_value<int>(*wf, msg_type);
+            pm_tiny::fappend_value(*wf, msg_content);
+            frames.push_back(std::move(wf));
+        } else {
+            std::vector<std::string> contents;
+            auto n_frame = msg_content.size() / frame_size;
+            for (size_t i = 0; i < n_frame; i++) {
+                contents.push_back(msg_content.substr(frame_size * i, frame_size));
+            }
+            if ((msg_content.size() % frame_size) != 0) {
+                contents.push_back(msg_content.substr(n_frame * frame_size));
+            }
+            for (size_t i = 0; i < contents.size(); i++) {
+                auto wf = std::make_unique<pm_tiny::frame_t>();
+                if (i < contents.size() - 1) {
+                    pm_tiny::fappend_value<int>(*wf, 2);
+                } else {
+                    pm_tiny::fappend_value<int>(*wf, msg_type);
+                }
+                pm_tiny::fappend_value(*wf, contents[i]);
+                frames.push_back(std::move(wf));
+            }
+        }
+        return frames;
+    }
 
     template<typename B1, typename B2>
     struct my_or : public std::conditional<B1::value, B1, B2>::type {
@@ -96,7 +132,7 @@ namespace pm_tiny {
     class oframe_stream {
     public:
 
-        explicit oframe_stream(std::shared_ptr<frame_t> frame) : frame_(std::move(frame)) {
+        explicit oframe_stream(std::unique_ptr<frame_t> frame) : frame_(std::move(frame)) {
         }
 
         oframe_stream(const oframe_stream &) = delete;
@@ -123,6 +159,15 @@ namespace pm_tiny {
         frame_ptr_t frame_;
     };
 
+    class BufferInsufficientException : public std::runtime_error {
+    public:
+        BufferInsufficientException()
+                : std::runtime_error("Insufficient buffer data to complete the read operation.") {}
+
+        explicit BufferInsufficientException(const std::string &message)
+                : std::runtime_error(message) {}
+    };
+
     class iframe_stream {
     public:
         explicit iframe_stream(frame_t frame) : frame_(std::move(frame)) {
@@ -133,19 +178,61 @@ namespace pm_tiny {
 
         iframe_stream(iframe_stream &&) = delete;
 
+        template<typename T, typename R=void>
+        using TypeConstraint = std::enable_if_t<std::is_arithmetic<T>::value, R>;
+
+        void ensure_buffer_capacity(size_t type_size) {
+            auto end = this->frame_.data() + this->frame_.size();
+            if (static_cast<size_t>(end - addr_) < type_size) {
+                throw BufferInsufficientException();
+            }
+        }
+
         template<typename T>
-        inline std::enable_if_t<std::is_arithmetic<T>::value, iframe_stream &>
+        inline TypeConstraint<T, iframe_stream &>
         fget_value(T &n) {
-            n = *((T *) addr_);
+            ensure_buffer_capacity(sizeof(T));
+            memcpy(&n, addr_, sizeof(T));
             addr_ += sizeof(T);
             return *this;
         }
 
+        class StreamPositionGuard {
+        public:
+            StreamPositionGuard(const byte_t *&addr, size_t type_size)
+                    : addr_(addr), type_size_(type_size), release_(false) {}
+
+            StreamPositionGuard(const StreamPositionGuard &) = delete;
+
+            StreamPositionGuard(StreamPositionGuard &&) = delete;
+
+            StreamPositionGuard &operator=(const StreamPositionGuard &) = delete;
+
+            ~StreamPositionGuard() {
+                if (addr_ && !release_) {
+                    addr_ -= type_size_;
+                }
+            }
+
+            void release() {
+                release_ = true;
+            }
+
+        private:
+            const byte_t *&addr_;
+            size_t type_size_;
+            bool release_;
+        };
+
+        //strong guarantee.
         iframe_stream &fget_value(std::string &str) {
             int len;
             fget_value<int>(len);
+            StreamPositionGuard guard(addr_, sizeof(int));
+            ensure_buffer_capacity(len);
             str = std::string((char *) addr_, len);
             addr_ += len;
+            guard.release();
             return *this;
         }
 
@@ -159,6 +246,10 @@ namespace pm_tiny {
 
         const frame_t &get_frame() const {
             return this->frame_;
+        }
+
+        const byte_t *get_addr() const {
+            return addr_;
         }
 
     private:

@@ -4,10 +4,14 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <string>
+#include <iostream>
 int main(int argc,char*argv[]){
-    for(int i=0;i<5;i++){
-        printf("%s ===%d===\n",argv[0],i);
-        sleep(1);
-    }
-    return 0;
+    std::string x= getenv("PM_TINY_HOME");
+    std::cout<<"`"<<x<<"`"<<std::endl;
+//    for(int i=0;i<5;i++){
+//        printf("%s ===%d===\n",argv[0],i);
+//        sleep(1);
+//    }
+    return -1;
 }

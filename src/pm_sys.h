@@ -4,7 +4,7 @@
 
 #ifndef PM_TINY_PM_SYS_H
 #define PM_TINY_PM_SYS_H
-
+#include <string>
 #include <sys/types.h>
 #include <signal.h>
 #include <functional>
@@ -25,7 +25,7 @@ namespace pm_tiny {
         std::string pw_dir;            /* Home directory.  */
         std::string pw_shell;        /* Shell program.  */
     };
-
+    ssize_t safe_send(int fd, const void *buf, size_t n, int flags);
     ssize_t safe_read(int fd, void *buf, size_t nbytes);
 
     ssize_t safe_write(int fd, const void *buf, size_t n);
@@ -33,6 +33,7 @@ namespace pm_tiny {
     pid_t safe_waitpid(pid_t pid, int *wstat, int options);
 
     int set_nonblock(int fd);
+    int set_cloexec(int fd);
 
     int set_sigaction(int sig, sighandler_t sighandler);
 
@@ -56,6 +57,8 @@ namespace pm_tiny {
     int get_uid_from_username(const char *name, passwd_t &passwd);
     int create_pty(struct pty_info *p);
     int  tcsetattr_stdin_TCSANOW(const struct ::termios *tp);
+
+    void process_reboot();
 }
 
 #endif //PM_TINY_PM_SYS_H

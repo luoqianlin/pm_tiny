@@ -62,11 +62,19 @@ namespace pm_tiny {
 
         int write_frame(const pm_tiny::frame_ptr_t &f, int block = 0);
 
+        void mark_close();
+
+        bool is_marked_close() const;
+
+        int shutdown_read();
+
 #if PM_TINY_SERVER
+        bool is_new_created_ = false;
 
         void set_prog(prog_info_t *prog);
 
         prog_info_t *get_prog();
+
 #endif
     private:
         int fd_ = -1;
@@ -74,10 +82,12 @@ namespace pm_tiny {
         int fsbuf_size_ = 0;
         int frbuf_size_ = 0;
         int fd_nonblock_ = 0;
-        std::deque<frame_ptr_t> recv_buf = {std::make_shared<frame_t>()};//last item as tmp buffer
+        std::deque<frame_ptr_t> recv_buf = {};//last item as tmp buffer
         std::deque<frame_ptr_t> send_buf = {};
+        frame_t recv_frame_buf_;
+        bool mark_closed_ = false;
 #if PM_TINY_SERVER
-        prog_info_t* prog_=nullptr;
+        prog_info_t *prog_ = nullptr;
 
 #endif
     };

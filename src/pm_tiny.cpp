@@ -3,15 +3,17 @@
 #include "time_util.h"
 #include "prog.h"
 #include "assert.h"
+#include "ScopeGuard.h"
+#include "pm_tiny_funcs.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
-using pm_tiny_server_t=pm_tiny::pm_tiny_server_t;
+using pm_tiny_server_t = pm_tiny::pm_tiny_server_t;
 
 
 void kill_prog(proglist_t &progs);
 
-size_t get_current_alive_prog(proglist_t &pm_tiny_progs);
+size_t get_living_processes_count(proglist_t &pm_tiny_progs);
 
 void check_prog_has_event(int total_ready_fd, proglist_t &pm_tiny_progs,
                           fd_set &rfds, int &_readyfd);
@@ -24,37 +26,29 @@ void check_listen_sock_has_event(int sock_fd,
                                  std::vector<pm_tiny::session_ptr_t> &sessions,
                                  int &_readyfd, fd_set &rfds);
 
-pm_tiny::frame_ptr_t make_prog_info_data(proglist_t &pm_tiny_progs);
-
-std::shared_ptr<pm_tiny::frame_t>
-handle_cmd_start(pm_tiny_server_t &pm_tiny_server, pm_tiny::iframe_stream &ifs,
-                 std::shared_ptr<pm_tiny::session_t> &session);
-
 void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions);
-
-std::string msg_cmd_not_completed(const std::string &name);
 
 static sig_atomic_t exit_signal = 0;
 static sig_atomic_t alarm_signal = 0;
 static sig_atomic_t hup_signal = 0;
 static sig_atomic_t exit_chld_signal = 0;
 
-void sig_exit_handler(int sig, siginfo_t *info, void *ucontext) {
+void sig_exit_handler(int sig, siginfo_t *, void *) {
     pm_tiny::logger->safe_signal_log(sig);
     exit_signal = sig;
 }
 
-void sig_chld_handler(int sig, siginfo_t *info, void *ucontext) {
+void sig_chld_handler(int sig, siginfo_t *, void *) {
     pm_tiny::logger->safe_signal_log(sig);
     exit_chld_signal = sig;
 }
 
-void sig_alarm_handler(int sig, siginfo_t *info, void *ucontext) {
+void sig_alarm_handler(int sig, siginfo_t *, void *) {
     pm_tiny::logger->safe_signal_log(sig);
     alarm_signal = sig;
 }
 
-void sig_hup_handler(int sig, siginfo_t *info, void *ucontext) {
+void sig_hup_handler(int sig, siginfo_t *, void *) {
     pm_tiny::logger->safe_signal_log(sig);
     hup_signal = sig;
 }
@@ -65,7 +59,7 @@ pid_t wait_any_nohang(int *wstat) {
 
 
 static void check_delayed_exit_sig(pm_tiny_server_t &tiny_server) {
-    proglist_t &pm_tiny_progs = tiny_server.pm_tiny_progs;
+//    proglist_t &pm_tiny_progs = tiny_server.pm_tiny_progs;
     sig_atomic_t save_exit_signal = exit_signal;
     exit_signal = 0;
     if (save_exit_signal) {
@@ -73,70 +67,33 @@ static void check_delayed_exit_sig(pm_tiny_server_t &tiny_server) {
                          || save_exit_signal == SIGINT
                          || save_exit_signal == SIGSTOP;
         if (terminate) {
-            kill_prog(pm_tiny_progs);
-            tiny_server.server_exit = 1;
+//            kill_prog(pm_tiny_progs);
+            tiny_server.request_quit();
         }
     }
 }
 
-
-static void get_add_remove_progs(proglist_t &pm_tiny_progs, proglist_t &new_proglist,
-                                 proglist_t &add_progs, proglist_t &remove_progs) {
-    std::list<std::tuple<prog_ptr_t, prog_ptr_t>> equal_progs;
-    for (auto iter = std::begin(pm_tiny_progs); iter != std::end(pm_tiny_progs); iter++) {
-        for (auto n_iter = std::begin(new_proglist); n_iter != std::end(new_proglist); n_iter++) {
-            if ((*n_iter)->name == (*iter)->name && (*n_iter)->work_dir == (*iter)->work_dir
-                && (*n_iter)->args == (*iter)->args) {
-                equal_progs.emplace_back(std::make_tuple(*iter, *n_iter));
-                break;
-            }
-        }
-    }
-    for (auto n_iter = std::begin(new_proglist); n_iter != std::end(new_proglist); n_iter++) {
-        bool find = false;
-        for (auto iter = std::begin(equal_progs); iter != std::end(equal_progs); iter++) {
-            if ((*n_iter) == std::get<1>(*iter)) {
-                find = true;
-                break;
-            }
-        }
-        if (!find) {
-            add_progs.emplace_back(*n_iter);
-        }
-    }
-
-    for (auto iter = std::begin(pm_tiny_progs); iter != std::end(pm_tiny_progs); iter++) {
-        bool find = false;
-        for (auto eiter = std::begin(equal_progs); eiter != std::end(equal_progs); eiter++) {
-            if (*iter == std::get<0>(*eiter)) {
-                find = true;
-                break;
-            }
-        }
-        if (!find) {
-            remove_progs.emplace_back(*iter);
-        }
-    }
-}
-
-auto xx_kill_1 = [](prog_ptr_t &p, int signo) {
+static bool xx_kill_1(prog_ptr_t &p, int signo) {
     bool find = false;
     if (p->pid != -1) {
         find = true;
 //        logger->debug("kill %s(%d)", p->name.c_str(), p->pid);
         int rt = kill(p->pid, signo);
         if (rt == -1) {
-            pm_tiny::logger->syscall_errorlog("kill");
+            PM_TINY_LOG_E_SYS("kill");
         }
     }
     return find;
-};
-auto xx_wait_1 = [](prog_ptr_t &p, int options) {
+}
+
+bool xx_wait_1(prog_ptr_t &p, int options) {
     bool find = false;
     if (p->pid != -1) {
-        int rc = pm_tiny::safe_waitpid(p->pid, nullptr, options);
+        int wstatus;
+        int rc = pm_tiny::safe_waitpid(p->pid, &wstatus, options);
         if (rc == p->pid) {
-//            logger->debug("waitpid %s(%d)", p->name.c_str(), p->pid);
+//          logger->debug("waitpid %s(%d)", p->name.c_str(), p->pid);
+            p->last_wstatus = wstatus;
             p->pid = -1;
             p->state = PM_TINY_PROG_STATE_STOPED;
         } else {
@@ -187,10 +144,10 @@ void kill_prog(proglist_t &progs) {
     };
     bool find = xx_kill(progs, SIGTERM);
     if (find) {
-        auto max_iter=std::max_element(progs.begin(), progs.end(),
-                                       [](const prog_ptr_t &p1, const prog_ptr_t &p2) {
-                                           return p1->kill_timeout_sec < p2->kill_timeout_sec;
-                                       });
+        auto max_iter = std::max_element(progs.begin(), progs.end(),
+                                         [](const prog_ptr_t &p1, const prog_ptr_t &p2) {
+                                             return p1->kill_timeout_sec < p2->kill_timeout_sec;
+                                         });
         auto kill_timeout_sec = (*max_iter)->kill_timeout_sec;
         pm_tiny::sleep_waitfor(kill_timeout_sec, [&]() {
             find = xx_wait(progs, WNOHANG);
@@ -212,116 +169,70 @@ void kill_prog(proglist_t &progs) {
                   });
 }
 
-static void log_proglist(proglist_t &pm_tiny_progs) {
-    std::stringstream ss;
-    int i = 0;
-    ss << '\n';
-    using pm_tiny::operator<<;
-    for (auto it = pm_tiny_progs.begin(); it != pm_tiny_progs.end(); it++) {
-        ss << "--- " << i++ << " ---\n";
-        ss << *((*it).get()) << "\n";
-    }
-    pm_tiny::logger->debug(ss.str().c_str());
-}
-
-/**
- * 检测是否收到过SIGHUP信号，如果存在重新加载配置
- * */
-static void check_delayed_hup_sig(pm_tiny_server_t &tiny_server) {
-    proglist_t &pm_tiny_progs = tiny_server.pm_tiny_progs;
-    if (tiny_server.server_exit)return;
-    sig_atomic_t save_hup_signal = hup_signal;
-    hup_signal = 0;
-    if (save_hup_signal) {
-        proglist_t new_proglist;
-        tiny_server.parse_cfg(new_proglist);
-        proglist_t add_progs;
-        proglist_t remove_progs;
-        get_add_remove_progs(pm_tiny_progs, new_proglist, add_progs, remove_progs);
-        pm_tiny::logger->debug("prog add:%d remove:%d", add_progs.size(), remove_progs.size());
-        kill_prog(remove_progs);
-        pm_tiny::logger->debug("--- erase before ---");
-        log_proglist(pm_tiny_progs);
-        pm_tiny_progs.erase(
-                std::remove_if(pm_tiny_progs.begin(), pm_tiny_progs.end(), [&remove_progs](const prog_ptr_t &prog) {
-                    return std::find(remove_progs.begin(), remove_progs.end(), prog) != remove_progs.end();
-                }), pm_tiny_progs.end());
-        pm_tiny::logger->debug("--- erase after ---");
-        log_proglist(pm_tiny_progs);
-        tiny_server.restart_startfailed();
-        std::for_each(std::begin(add_progs), std::end(add_progs), [&tiny_server](prog_ptr_t &prog) {
-            int ret = tiny_server.spawn_prog(*prog);
-            if (ret != -1) {
-                prog->init_prog_log();
-            }
-        });
-        std::copy(add_progs.begin(), add_progs.end(), std::back_inserter(pm_tiny_progs));
-        pm_tiny::logger->debug("--- add after ---");
-        log_proglist(pm_tiny_progs);
-    }
-}
-
-
-
 /*
  * 检查是否有子进程退出，如果有则回收子进程空间(waitpid)
  * */
 void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
     proglist_t &pm_tiny_progs = tiny_server.pm_tiny_progs;
-    int wstatus, w, rc;
+    int wstatus, rc;
     sig_atomic_t save_exit_chld_signal = exit_chld_signal;
     exit_chld_signal = 0;
     if (save_exit_chld_signal) {
+        proglist_t starting_prog;
         proglist_t penddingtask_progs;
-        size_t wait_proc_num = get_current_alive_prog(pm_tiny_progs);
+        proglist_t deleting_progs;
+        size_t wait_proc_num = get_living_processes_count(pm_tiny_progs);
         while (wait_proc_num > 0) {
             rc = wait_any_nohang(&wstatus);
             if (rc > 0) {
                 auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                                         [&rc](const prog_ptr_t &v) { return v->pid == rc; });
+                                         [rc](const prog_ptr_t &v) { return v->pid == rc; });
 
                 if (iter != pm_tiny_progs.end()) {
                     auto p = *iter;
-                    std::string exit_info=pm_tiny::prog_info_t::log_proc_exit_status(&(*p), rc, wstatus);
-                    pm_tiny::logger->info(exit_info.c_str());
-                    auto now_ms = pm_tiny::time::gettime_monotonic_ms();
+                    std::string exit_info = pm_tiny::prog_info_t::log_proc_exit_status(&(*p), rc, wstatus);
+                    PM_TINY_LOG_I("%s", exit_info.c_str());
+                    auto now_ms = p->update_count_timer();
                     auto life_time = now_ms - p->last_startup_ms;
                     p->last_wstatus = wstatus;
-                    if ((now_ms - p->last_dead_time_ms) > p->moniter_duration_threshold) {
-                        p->last_dead_time_ms = now_ms;
-                        p->dead_count_timer = 0;
-                    } else {
-                        p->dead_count_timer++;
-                    }
                     p->close_fds();
-                    if(p->state==PM_TINY_PROG_STATE_REQUEST_STOP) {
+                    if (p->state == PM_TINY_PROG_STATE_REQUEST_STOP ||
+                        p->state == PM_TINY_PROG_STATE_REQUEST_DELETE) {
                         penddingtask_progs.push_back(p);
                     }
-                    bool normal_exit = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0)
-                                       || p->state == PM_TINY_PROG_STATE_REQUEST_STOP;
+                    if (p->state == PM_TINY_PROG_STATE_REQUEST_DELETE) {
+                        deleting_progs.push_back(p);
+                    }
+                    bool normal_exit = p->state == PM_TINY_PROG_STATE_REQUEST_STOP
+                                       || p->state == PM_TINY_PROG_STATE_REQUEST_DELETE
+                                       || !p->daemon;
                     if (!normal_exit) {
-                        if ((p->dead_count_timer < p->moniter_duration_max_dead_count ||
-                             p->moniter_duration_max_dead_count <= 0) &&
-                            life_time > p->min_lifetime_threshold) {
+                        if (!p->is_reach_max_num_death() && life_time > p->min_lifetime_threshold) {
                             p->dead_count++;
-                            if (!tiny_server.server_exit) {
-                                int ret = tiny_server.start_prog(p);
-                                if (ret == -1) {
-                                    pm_tiny::logger->syscall_errorlog("chld_sig try restart `%s` fail",
-                                                                      p->name.c_str());
-                                }
+                            int ret = tiny_server.start_prog(p);
+                            if (ret == -1) {
+                                PM_TINY_LOG_E_SYS("chld_sig try restart `%s` fail", p->name.c_str());
+                                tiny_server.flag_startup_fail(p);
                             }
+                            //Programs that depend on this program will not start
                         } else {
+                            if (p->state == PM_TINY_PROG_STATE_STARTING) {
+                                starting_prog.push_back(p);
+                            }
                             if (life_time > p->min_lifetime_threshold) {
-                                pm_tiny::logger->info("%s die %d times within %.4f minutes\n ", p->name.c_str(),
-                                             p->dead_count_timer, p->moniter_duration_threshold / (60 * 1000.0f));
+                                PM_TINY_LOG_I("`%s` die %d times within %.4fmin", p->name.c_str(),
+                                              p->dead_count_timer,
+                                              p->moniter_duration_threshold / (60 * 1000.0f));
                             } else {
-                                pm_tiny::logger->info("life time %.4fs <= %.4fs\n", life_time / 1000.0f,
-                                             p->min_lifetime_threshold / 1000.0f);
+                                PM_TINY_LOG_I("life time %.4fs <= %.4fs", life_time / 1000.0f,
+                                              p->min_lifetime_threshold / 1000.0f);
                             }
                             p->set_state(PM_TINY_PROG_STATE_STOPED);
                         }
                     } else {
+                        if (p->state == PM_TINY_PROG_STATE_STARTING) {
+                            starting_prog.push_back(p);
+                        }
                         if (p->state == PM_TINY_PROG_STATE_REQUEST_STOP) {
                             p->set_state(PM_TINY_PROG_STATE_STOPED);
                         } else {
@@ -330,29 +241,117 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                     }
                 } else {
                     std::string exit_info = pm_tiny::prog_info_t::log_proc_exit_status(nullptr, rc, wstatus);
-                    pm_tiny::logger->info(exit_info.c_str());
+                    PM_TINY_LOG_I("%s", exit_info.c_str());
                 }
 
-                size_t proc_num = get_current_alive_prog(pm_tiny_progs);
-                pm_tiny::logger->info("current proc:%zu\n", proc_num);
+                size_t proc_num = get_living_processes_count(pm_tiny_progs);
+//                PM_TINY_LOG_D("current proc:%zu\n", proc_num);
                 if (proc_num <= 0) {
                     break;
                 }
             } else {
                 if (rc == -1) {
-                    pm_tiny::logger->syscall_errorlog("waitpid");
+                    PM_TINY_LOG_E_SYS("waitpid");
                 }
                 break;
             }
         }
+        if (!starting_prog.empty()) {
+            tiny_server.spawn1(starting_prog);
+        }
         for (auto &p: penddingtask_progs) {
             p->execute_penddingtasks(tiny_server);
         }
+        for (auto &p: deleting_progs) {
+            tiny_server.remove_prog(p);
+        }
+    }
+    proglist_t starting_prog;
+    bool reboot = false;
+    for (auto &prog: pm_tiny_progs) {
+        if (prog->state == PM_TINY_PROG_STATE_REQUEST_STOP
+            || prog->state == PM_TINY_PROG_STATE_REQUEST_DELETE) {
+            if (prog->pid != -1 && prog->is_kill_timeout()) {
+                prog->async_force_kill();
+            }
+        } else {
+            if (tiny_server.is_exiting()) {
+                continue;
+            }
+            if (prog->state == PM_TINY_PROG_STATE_STARTING) {
+                if (prog->pid != -1 && prog->is_start_timeout()) {
+                    if (prog->failure_action == pm_tiny::failure_action_t::SKIP
+                        || prog->start_timeout == 0) {
+                        starting_prog.push_back(prog);
+                        prog->state = PM_TINY_PROG_STATE_RUNING;
+                        prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
+                        PM_TINY_LOG_D("start timeout:%s", prog->name.c_str());
+                    } else if (prog->failure_action == pm_tiny::failure_action_t::RESTART) {
+                        prog->async_kill_prog();
+                        auto start_prog_task =
+                                [&prog](pm_tiny_server_t &pm_tiny_server) {
+                                    assert(prog->state != PM_TINY_PROG_STATE_RUNING);
+                                    int rc = pm_tiny_server.start_prog(prog);
+                                    if (rc == -1) {
+                                        std::string errmsg(strerror(errno));
+                                        PM_TINY_LOG_I("start prog fail:%s", errmsg.c_str());
+                                        pm_tiny_server.flag_startup_fail(prog);
+//                                    proglist_t pl;
+//                                    pl.push_back(prog);
+//                                    pm_tiny_server.spawn1(pl);
+                                    } else {
+                                        prog->dead_count++;
+                                    }
+                                };
+                        prog->kill_pendingtasks.emplace_back(start_prog_task);
+                    } else {
+                        PM_TINY_LOG_I("`%s` start timeout reboot now.", prog->name.c_str());
+                        pm_tiny::process_reboot();
+                        reboot = true;
+                        break;
+                    }
+                }
+            } else if (prog->state == PM_TINY_PROG_STATE_RUNING) {
+                if (prog->pid != -1 && prog->is_tick_timeout()) {
+                    if (prog->failure_action == pm_tiny::failure_action_t::RESTART) {
+                        PM_TINY_LOG_I("`%s` tick timeout restart now.", prog->name.c_str());
+                        prog->async_kill_prog();
+                        auto start_prog_task =
+                                [&prog](pm_tiny_server_t &pm_tiny_server) {
+                                    assert(prog->state != PM_TINY_PROG_STATE_RUNING);
+                                    int rc = pm_tiny_server.start_prog(prog);
+                                    if (rc == -1) {
+                                        std::string errmsg(strerror(errno));
+                                        PM_TINY_LOG_I("start prog fail:%s", errmsg.c_str());
+//                                proglist_t pl;
+//                                pl.push_back(prog);
+//                                pm_tiny_server.spawn1(pl);
+                                        pm_tiny_server.flag_startup_fail(prog);
+                                    } else {
+                                        prog->dead_count++;
+                                    }
+                                };
+                        prog->kill_pendingtasks.emplace_back(start_prog_task);
+                    } else if (prog->failure_action == pm_tiny::failure_action_t::REBOOT) {
+                        PM_TINY_LOG_I("`%s` tick timeout reboot now.", prog->name.c_str());
+                        pm_tiny::process_reboot();
+                        reboot = true;
+                        break;
+                    } else if (prog->failure_action == pm_tiny::failure_action_t::SKIP) {
+//                    PM_TINY_LOG_I("`%s` tick timeout skip.", prog->name.c_str());
+                    }
+                }
+            }
+        }
+    }
+
+    if (!reboot && !starting_prog.empty()) {
+        tiny_server.spawn1(starting_prog);
     }
 }
 
-size_t get_current_alive_prog(proglist_t &pm_tiny_progs) {
-    size_t wait_proc_num = std::count_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
+size_t get_living_processes_count(proglist_t &pm_tiny_progs) {
+    size_t wait_proc_num = std::count_if(pm_tiny_progs.cbegin(), pm_tiny_progs.cend(),
                                          [](const prog_ptr_t &v) {
                                              return v->pid != -1;
                                          });
@@ -361,12 +360,11 @@ size_t get_current_alive_prog(proglist_t &pm_tiny_progs) {
 
 void check_delayed_sigs(pm_tiny_server_t &tiny_server) {
     check_delayed_exit_sig(tiny_server);
-    check_delayed_hup_sig(tiny_server);
     check_delayed_chld_sig(tiny_server);
 }
 
 void install_exit_handler() {
-    struct sigaction act;
+    struct sigaction act{};
     sigemptyset(&act.sa_mask);
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = sig_exit_handler;
@@ -376,7 +374,7 @@ void install_exit_handler() {
 }
 
 void install_chld_handler() {
-    struct sigaction act;
+    struct sigaction act{};
     sigemptyset(&act.sa_mask);
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = sig_chld_handler;
@@ -384,26 +382,27 @@ void install_chld_handler() {
 }
 
 void install_hup_handler() {
-    struct sigaction act;
+    struct sigaction act{};
     sigemptyset(&act.sa_mask);
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = sig_hup_handler;
     sigaction(SIGHUP, &act, nullptr);
 }
+
 void install_alarm_handler() {
-    struct sigaction act;
+    struct sigaction act{};
     sigemptyset(&act.sa_mask);
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = sig_alarm_handler;
     sigaction(SIGALRM, &act, nullptr);
 }
-int open_uds_listen_fd(const std::string& sock_path) {
+
+int open_uds_listen_fd(const std::string &sock_path) {
     int sfd;
-    struct sockaddr_un my_addr;
+    struct sockaddr_un my_addr{};
     sfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sfd == -1) {
-        pm_tiny::logger->syscall_errorlog("socket");
-        exit(EXIT_FAILURE);
+        pm_tiny::logger->syscall_fatal("socket");
     };
 
     memset(&my_addr, 0, sizeof(struct sockaddr_un));
@@ -413,78 +412,108 @@ int open_uds_listen_fd(const std::string& sock_path) {
 
     int rc = pm_tiny::set_nonblock(sfd);
     if (rc < 0) {
-        pm_tiny::logger->syscall_errorlog("fcntl");
-        exit(EXIT_FAILURE);
+        pm_tiny::logger->syscall_fatal("fcntl");
     }
-
+    rc = pm_tiny::set_cloexec(sfd);
+    if (rc < 0) {
+        pm_tiny::logger->syscall_fatal("set_cloexec");
+    }
     if (bind(sfd, (struct sockaddr *) &my_addr,
              sizeof(struct sockaddr_un)) == -1) {
-        pm_tiny::logger->syscall_errorlog("bind");
-        exit(EXIT_FAILURE);
+        pm_tiny::logger->syscall_fatal("bind");
     }
 
     if (listen(sfd, 5) == -1) {
-        pm_tiny::logger->syscall_errorlog("listen");
-        exit(EXIT_FAILURE);
+        pm_tiny::logger->syscall_fatal("listen");
     }
     return sfd;
 }
 
+int check_quit_or_reload(pm_tiny_server_t &pm_tiny_server) {
+    auto pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
+    auto living_processes_count = get_living_processes_count(pm_tiny_progs);
+    if (pm_tiny_server.is_exiting()) {
+//        PM_TINY_LOG_D("==>prog_num:%d", living_processes_count);
+        if (living_processes_count == 0) {
+            if (!pm_tiny_server.reload_config) {
+                return 1;
+            }
+            pm_tiny_server.server_exit = 0;
+            int code = 0;
+            std::string msg = "success";
+            if (!pm_tiny_server.reload_config->is_valid()) {
+                code = -1;
+                msg = "invalid configuration";
+            }
+            for (auto &wk: pm_tiny_server.wait_reload_sessions) {
+                auto session = wk.lock();
+                if (session && !session->is_close()) {
+                    auto wf = std::make_unique<pm_tiny::frame_t>();
+                    pm_tiny::fappend_value<int>(*wf, code);
+                    pm_tiny::fappend_value(*wf, msg);
+                    session->write_frame(wf);
+                }
+            }
+            pm_tiny_server.wait_reload_sessions.clear();
+            if (code == -1) {
+                pm_tiny::delete_proglist(pm_tiny_server.reload_config->pl_);
+                pm_tiny_server.reload_config->pl_.clear();
+                return 0;
+            }
+            pm_tiny_server.swap_reload_config();
+            delete_proglist(pm_tiny_progs);
+            pm_tiny_server.show_prog_depends_info();
+            pm_tiny_server.spawn();
+        }
+    }
+    return 0;
+}
 
 void start(pm_tiny_server_t &pm_tiny_server) {
-    pm_tiny::logger->debug("pm_tiny pid:%d\n", getpid());
+    PM_TINY_LOG_D("pm_tiny pid:%d\n", getpid());
     fd_set rfds;
     fd_set wfds;
     int rc = 0;
-    auto sock_path = pm_tiny_server.pm_tiny_home_dir + "/pm_tinyd.sock";
+    auto sock_path = pm_tiny_server.pm_tiny_sock_file;
     unlink(sock_path.c_str());
 
     rc = pm_tiny::set_sigaction(SIGPIPE, SIG_IGN);
     if (rc == -1) {
-        pm_tiny::logger->syscall_errorlog("sigaction SIGPIPE");
+        PM_TINY_LOG_FATAL_SYS("sigaction SIGPIPE");
     }
     int sock_fd = open_uds_listen_fd(sock_path);
-    pm_tiny_server.parse_cfg();
-    if (pm_tiny_server.pm_tiny_progs.empty()) {
-        pm_tiny::logger->debug("progs empty\n");
+    rc = pm_tiny_server.parse_cfg();
+    if (rc != 0) {
+        exit(EXIT_FAILURE);
     }
+
+    pm_tiny_server.show_prog_depends_info();
 
     install_exit_handler();
     install_chld_handler();
     install_hup_handler();
     install_alarm_handler();
     pm_tiny_server.spawn();
-    proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
-    std::vector<pm_tiny::session_ptr_t>& sessions=pm_tiny_server.sessions;
-    using pm_tiny::operator<<;
-    sigset_t smask, empty_mask,osigmask;
+    std::vector<pm_tiny::session_ptr_t> &sessions = pm_tiny_server.sessions;
+    sigset_t smask, empty_mask, osigmask;
     sigemptyset(&smask);
     sigaddset(&smask, SIGSTOP);
     sigaddset(&smask, SIGTERM);
     sigaddset(&smask, SIGINT);
     sigaddset(&smask, SIGCHLD);
     sigaddset(&smask, SIGHUP);
+    sigaddset(&smask, SIGALRM);
     rc = sigprocmask(SIG_SETMASK, nullptr, &osigmask);
     if (rc == -1) {
-        PM_TINY_LOG_E_SYS("sigprocmask");
-        exit(EXIT_FAILURE);
+        PM_TINY_LOG_FATAL_SYS("sigprocmask");
     }
     sigemptyset(&empty_mask);
 
     while (true) {
         if (sigprocmask(SIG_BLOCK, &smask, nullptr) == -1) {
-            PM_TINY_LOG_E_SYS("sigprocmask");
-            exit(EXIT_FAILURE);
+            PM_TINY_LOG_FATAL_SYS("sigprocmask");
         }
         check_delayed_sigs(pm_tiny_server);
-        for (auto &prog: pm_tiny_progs) {
-            if (prog->state == PM_TINY_PROG_STATE_REQUEST_STOP) {
-                if (prog->pid != -1 && prog->is_kill_timeout()) {
-                    prog->async_force_kill();
-                }
-            }
-        }
-
         FD_ZERO(&rfds);
         FD_ZERO(&wfds);
         int max_fd = -1;
@@ -501,52 +530,60 @@ void start(pm_tiny_server_t &pm_tiny_server) {
         auto f_fd2wfds = [&f_fd2set, &wfds](const int &fd) {
             f_fd2set(fd, wfds);
         };
+        proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
         for (auto &prog_info: pm_tiny_progs) {
             std::for_each(std::begin(prog_info->rpipefd),
                           std::end(prog_info->rpipefd), f_fd2rfds);
         }
-        if (!pm_tiny_server.server_exit) {
-            std::for_each(sessions.begin(), sessions.end(),
-                          [&f_fd2rfds, &f_fd2wfds](const pm_tiny::session_ptr_t &session) {
-
-                              f_fd2rfds(session->get_fd());
-                              if (session->sbuf_size() > 0) {
-//                                  printf("%d sbuf_size:%d\n", session->get_fd(), session->sbuf_size());
-                                  f_fd2wfds(session->get_fd());
-                              }
-                          });
-            f_fd2rfds(sock_fd);
-        } else if (!sessions.empty()) {
-            close(sock_fd);
-            std::for_each(sessions.begin(), sessions.end(),
-                          [](const pm_tiny::session_ptr_t &session) {
-                              session->close();
-                          });
-            sessions.clear();
-        }
-        if (max_fd < 0) {
-            if (!pm_tiny_server.server_exit) {
-                pselect(0, nullptr, nullptr, nullptr, nullptr,&empty_mask);
-                continue;
+        for (auto iter = sessions.begin(); iter != sessions.end();) {
+            auto &session = *iter;
+            if (session->sbuf_size() > 0) {
+//              printf("%d sbuf_size:%d\n", session->get_fd(), session->sbuf_size());
+                f_fd2wfds(session->get_fd());
+            } else if (session->is_marked_close()) {
+                session->close();
+            }
+            if (!session->is_close()) {
+                f_fd2rfds(session->get_fd());
+                iter++;
             } else {
+                iter = sessions.erase(iter);
+            }
+        }
+        f_fd2rfds(sock_fd);
+        if (max_fd < 0) {
+            pselect(0, nullptr, nullptr, nullptr, nullptr, &empty_mask);
+            continue;
+        }
+        auto living_processes_count = get_living_processes_count(pm_tiny_progs);
+        struct timespec timeout{};
+        timeout.tv_nsec = 500 * 1e6;//500ms
+        if (living_processes_count == 0 && pm_tiny_server.is_exiting()) {
+            timeout.tv_nsec = 0;
+        }
+        rc = pselect(max_fd + 1, &rfds, &wfds, nullptr, &timeout, &empty_mask);
+        int select_errno = errno;
+        if (sigprocmask(SIG_SETMASK, &osigmask, nullptr) == -1) {
+            PM_TINY_LOG_FATAL_SYS("sigprocmask");
+        }
+        if (rc == 0) {
+//            PM_TINY_LOG_D("timeout");
+            auto ret = check_quit_or_reload(pm_tiny_server);
+            if (ret) {
                 break;
             }
-        }
-        rc = pselect(max_fd + 1, &rfds, &wfds, nullptr, nullptr,&empty_mask);
-        if (sigprocmask(SIG_SETMASK, &osigmask, nullptr) == -1) {
-            PM_TINY_LOG_E_SYS("sigprocmask");
-            exit(EXIT_FAILURE);
+            continue;
         }
         if (rc == -1) {
-            if (errno == EINTR) {
+            if (select_errno == EINTR) {
                 continue;
             }
-            pm_tiny::logger->syscall_errorlog("select");
+            PM_TINY_LOG_E_SYS("select");
             break;
         }
         int _readyfd = 0;
         check_prog_has_event(rc, pm_tiny_progs, rfds, _readyfd);
-        if (_readyfd < rc && !pm_tiny_server.server_exit) {
+        if (_readyfd < rc) {
             check_listen_sock_has_event(sock_fd, sessions, _readyfd, rfds);
             if (_readyfd < rc) {
                 check_sock_has_event(rc, pm_tiny_server, _readyfd, rfds, wfds,
@@ -554,235 +591,61 @@ void start(pm_tiny_server_t &pm_tiny_server) {
             }
         }
         remove_closed_session(sessions);
+        auto ret = check_quit_or_reload(pm_tiny_server);
+        if (ret) {
+            break;
+        }
     }
     if (sigprocmask(SIG_SETMASK, &osigmask, nullptr) == -1) {
-        PM_TINY_LOG_E_SYS("sigprocmask");
-        exit(EXIT_FAILURE);
+        PM_TINY_LOG_FATAL_SYS("sigprocmask");
     }
-    pm_tiny_server.server_exit = 1;
+    auto &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
     kill_prog(pm_tiny_progs);
-    pm_tiny_server.close_fds();
+    delete_proglist(pm_tiny_progs);
+    pm_tiny_progs.clear();
+    close(sock_fd);
+    if (!sessions.empty()) {
+        std::for_each(sessions.begin(), sessions.end(),
+                      [](const pm_tiny::session_ptr_t &session) {
+                          session->close();
+                      });
+        sessions.clear();
+    }
     unlink(sock_path.c_str());
-    pm_tiny::logger->info("pm_tiny exit");
+    PM_TINY_LOG_I("pm_tiny exit");
+}
+
+void mark_closed(pm_tiny::session_ptr_t &session) {
+    if (session->shutdown_read() < 0) {
+        PM_TINY_LOG_E_SYS("fd:%d", session->get_fd());
+    }
 }
 
 void check_sock_has_event(int total_ready_fd,
                           pm_tiny_server_t &pm_tiny_server, int &_readyfd,
                           fd_set &rfds, fd_set &wfds,
                           std::vector<pm_tiny::session_ptr_t> &sessions) {
-    proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
-    bool closed_session = false;
-    for (int i = 0; i < sessions.size() && _readyfd < total_ready_fd; i++) {
-        std::shared_ptr<pm_tiny::session_t> &session = sessions[i];
+    for (int i = 0; i < static_cast<int>(sessions.size()) && _readyfd < total_ready_fd; i++) {
+        auto &session = sessions[i];
         int s_fd = session->get_fd();
         if (FD_ISSET(s_fd, &rfds)) {
             auto rf = session->read_frame();
-            if (!session->is_close()) {
-                pm_tiny::logger->debug("%d is readable\n", s_fd);
-            }
             if (rf) {
-                pm_tiny::iframe_stream ifs(*rf);
-                uint8_t f_type;
-                ifs >> f_type;
-                if (f_type == 0x23) {//ls
-                    pm_tiny::frame_ptr_t f = make_prog_info_data(pm_tiny_progs);
-                    session->write_frame(f);
-                } else if (f_type == 0x24) {//stop
-                    std::string name;
-                    ifs >> name;
-                    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                                             [&name](const prog_ptr_t &prog) {
-                                                 return prog->name == name;
-                                             });
-
-                    if (iter == pm_tiny_progs.end()) {
-                        auto wf = std::make_shared<pm_tiny::frame_t>();
-                        pm_tiny::fappend_value<int>(*wf, 0x1);
-                        pm_tiny::fappend_value(*wf, "not found `" + name + "`");
-                        session->write_frame(wf);
-                    } else {
-                        auto prog_=*iter;
-                        if (!prog_->kill_pendingtasks.empty()) {
-                            auto wf = std::make_shared<pm_tiny::frame_t>();
-                            pm_tiny::fappend_value<int>(*wf, -0x3);
-                            std::string msg = msg_cmd_not_completed(name);
-                            pm_tiny::fappend_value(*wf, msg);
-                            session->write_frame(wf);
-                        } else {
-                            if (prog_->pid != -1) {
-                                auto stop_proc_task = [session](pm_tiny_server_t &pm_tiny_server) {
-                                    if (session->is_close()) {
-                                        return;
-                                    }
-                                    auto wf = std::make_shared<pm_tiny::frame_t>();
-                                    pm_tiny::fappend_value<int>(*wf, 0);
-                                    pm_tiny::fappend_value(*wf, "success");
-                                    session->write_frame(wf);
-                                };
-                                prog_->async_kill_prog();
-                                prog_->kill_pendingtasks.emplace_back(stop_proc_task);
-
-                            } else {
-                                auto wf = std::make_shared<pm_tiny::frame_t>();
-                                pm_tiny::fappend_value<int>(*wf, 2);
-                                pm_tiny::fappend_value(*wf, "`" + name + "` not running");
-                                session->write_frame(wf);
-                            }
-                        }
-                    }
-
-                } else if (f_type == 0x25) {//start
-                    std::shared_ptr<pm_tiny::frame_t> wf = handle_cmd_start(pm_tiny_server, ifs,session);
+                try {
+                    handle_frame(pm_tiny_server, rf, session);
+                } catch (pm_tiny::BufferInsufficientException &ex) {
+                    PM_TINY_LOG_E("fd:%d %s", s_fd, ex.what());
+                    auto wf = std::make_unique<pm_tiny::frame_t>();
+                    pm_tiny::fappend_value<int>(*wf, -0x1);
+                    pm_tiny::fappend_value(*wf, "Invalid argument");
                     session->write_frame(wf);
-                } else if (f_type == 0x26) {//save
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
-                    int ret = pm_tiny_server.save_proc_to_cfg();
-                    if (ret == 0) {
-                        pm_tiny::fappend_value<int>(*wf, 0);
-                        pm_tiny::fappend_value(*wf, "save success");
-                    } else {
-                        pm_tiny::fappend_value<int>(*wf, 1);
-                        pm_tiny::fappend_value(*wf, "save fail");
-                    }
-                    session->write_frame(wf);
-                } else if (f_type == 0x27) {//delete
-                    std::string name;
-                    ifs >> name;
-                    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                                             [&name](const prog_ptr_t &prog) {
-                                                 return prog->name == name;
-                                             });
-
-                    if (iter == pm_tiny_progs.end()) {
-                        auto wf = std::make_shared<pm_tiny::frame_t>();
-                        pm_tiny::fappend_value<int>(*wf, 0x1);
-                        pm_tiny::fappend_value(*wf, "not found `" + name + "`");
-                        session->write_frame(wf);
-                    } else {
-                        auto prog_ = *iter;
-                        if (!prog_->kill_pendingtasks.empty()) {
-                            auto wf = std::make_shared<pm_tiny::frame_t>();
-                            pm_tiny::fappend_value<int>(*wf, -0x3);
-                            std::string msg = msg_cmd_not_completed(name);
-                            pm_tiny::fappend_value(*wf, msg);
-                            session->write_frame(wf);
-                        } else {
-                            auto delete_prog_task = [session, prog_](pm_tiny_server_t &pm_tiny_server) {
-                                if (session->is_close()) {
-                                    return;
-                                }
-                                auto wf = std::make_shared<pm_tiny::frame_t>();
-                                pm_tiny_server.pm_tiny_progs.remove(prog_);
-                                pm_tiny::fappend_value<int>(*wf, 0);
-                                pm_tiny::fappend_value(*wf, "success");
-                                session->write_frame(wf);
-                            };
-
-                            if (prog_->pid != -1) {
-                                prog_->async_kill_prog();
-                                prog_->kill_pendingtasks.emplace_back(delete_prog_task);
-                            } else {
-                                delete_prog_task(pm_tiny_server);
-                            }
-                        }
-                    }
-
-                } else if (f_type == 0x28) {//restart
-                    std::string name;
-                    ifs >> name;
-                    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                                             [&name](const prog_ptr_t &prog) {
-                                                 return prog->name == name;
-                                             });
-                    if (iter == pm_tiny_progs.end()) {
-                        auto wf = std::make_shared<pm_tiny::frame_t>();
-                        pm_tiny::fappend_value<int>(*wf, -0x1);
-                        pm_tiny::fappend_value(*wf, "not found `" + name + "`");
-                        session->write_frame(wf);
-                    } else {
-                        auto prog_=*iter;
-                        if (!prog_->kill_pendingtasks.empty()) {
-                            auto wf = std::make_shared<pm_tiny::frame_t>();
-                            pm_tiny::fappend_value<int>(*wf, -0x3);
-                            std::string msg = msg_cmd_not_completed(name);
-                            pm_tiny::fappend_value(*wf, msg);
-                            session->write_frame(wf);
-                        } else {
-                            bool is_alive = prog_->pid != -1;
-                            auto start_prog_task = [session, prog_](pm_tiny_server_t
-                                                                    &pm_tiny_server) {
-                                if (session->is_close()) {
-                                    return;
-                                }
-                                auto wf = std::make_shared<pm_tiny::frame_t>();
-                                assert(prog_->state != PM_TINY_PROG_STATE_RUNING);
-                                int rc = pm_tiny_server.start_prog(prog_);
-                                if (rc == -1) {
-                                    std::string errmsg(strerror(errno));
-                                    pm_tiny::fappend_value<int>(*wf, 1);
-                                    pm_tiny::fappend_value(*wf, errmsg);
-                                } else {
-                                    prog_->dead_count++;
-                                    pm_tiny::fappend_value<int>(*wf, 0);
-                                    pm_tiny::fappend_value(*wf, "success");
-                                }
-                                session->write_frame(wf);
-                            };
-
-                            if (is_alive) {
-                                prog_->async_kill_prog();
-                                prog_->kill_pendingtasks.emplace_back(start_prog_task);
-                            } else {
-                                start_prog_task(pm_tiny_server);
-                            }
-                        }
-                    }
-                }else if(f_type==0x29){//version
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
-                    pm_tiny::fappend_value(*wf, PM_TINY_VERSION);
-                    session->write_frame(wf);
-                }else if(f_type==PM_TINY_FRAME_TYPE_SHOW_LOG){
-                    std::string name;
-                    ifs >> name;
-                    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                                             [&name](const prog_ptr_t &prog) {
-                                                 return prog->name == name;
-                                             });
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
-                    if (iter == pm_tiny_progs.end()) {
-                        pm_tiny::fappend_value<int>(*wf, 0x1);
-                        pm_tiny::fappend_value(*wf, "not found `" + name + "`");
-                        session->write_frame(wf);
-                    } else {
-                        bool is_alive = (*iter)->pid != -1;
-                        if (!is_alive) {
-                            pm_tiny::fappend_value<int>(*wf, 0x2);
-                            pm_tiny::fappend_value(*wf, "`" + name + "` not running");
-                            session->write_frame(wf);
-                        }else{
-#if PM_TINY_PTY_ENABLE
-                            (*iter)->add_session(session.get());
-                            pm_tiny::fappend_value<int>(*wf, 0);
-                            pm_tiny::fappend_value(*wf, "success");
-                            session->write_frame(wf);
-                            (*iter)->write_cache_log_to_session(session.get());
-#else
-                            pm_tiny::fappend_value<int>(*wf, 0x4);
-                            pm_tiny::fappend_value(*wf, "This version does not support this function");
-                            session->write_frame(wf);
-#endif
-                        }
-                    }
-
-                } else {
-                    pm_tiny::logger->info("unkown framae type:%#02X", f_type);
+                    mark_closed(session);
                 }
             } else {
                 //ignore
             }
             if (session->is_close()) {
-                closed_session = true;
-                pm_tiny::logger->debug("%d is closed\n", s_fd);
+                PM_TINY_LOG_D("%d is closed\n", s_fd);
             }
             _readyfd++;
         }
@@ -791,16 +654,6 @@ void check_sock_has_event(int total_ready_fd,
             _readyfd++;
         }
     }
-//    if (closed_session) {
-//        remove_closed_session(sessions);
-//    }
-}
-
-std::string msg_cmd_not_completed(const std::string &name) {
-    std::string msg = "On target `";
-    msg += name;
-    msg += "`, another operation is not completed, try later.";
-    return msg;
 }
 
 void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions) {
@@ -810,138 +663,16 @@ void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions) {
                                   }), sessions.end());
 }
 
-std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_server,
-                                                   pm_tiny::iframe_stream &ifs,
-                                                   std::shared_ptr<pm_tiny::session_t> &session) {
-    proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
-    //name:cwd:command
-    std::string name;
-    std::string cwd;
-    std::string command;
-    int local_resolved;
-    int env_num;
-    int kill_timeout;
-    std::string run_as;
-    int show_log=0;
-    ifs >> name >> cwd >> command >> local_resolved >> env_num;
-    std::vector<std::string> envs;
-    envs.resize(env_num);
-    for (int k = 0; k < env_num; k++) {
-        ifs >> envs[k];
-    }
-    ifs >> kill_timeout;
-    ifs >> run_as;
-    ifs >> show_log;
-//   std::cout << "name:`" + name << "` cwd:`" << cwd << "` command:`" << command
-//   << "` local_resolved:" << local_resolved << std::endl;
-//    PM_TINY_LOG_D("run_as:%s",run_as.c_str());
-    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                             [&name](const prog_ptr_t &prog) {
-                                 return prog->name == name;
-                             });
-    auto wf = std::make_shared<pm_tiny::frame_t>();
-    auto prog_bind_session = [&session](prog_ptr_t &prog,
-                                        pm_tiny::frame_ptr_t &wf) {
-#if PM_TINY_PTY_ENABLE
-        prog->add_session(session.get());
-        pm_tiny::fappend_value<int>(*wf, 1);
-        pm_tiny::fappend_value(*wf, "success");
-#else
-        pm_tiny::fappend_value<int>(*wf, 2);
-        pm_tiny::fappend_value(*wf, "This version does not support log display");
-#endif
-    };
-    if (iter == pm_tiny_progs.end()) {
-        prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
-        if (!prog) {
-            pm_tiny::fappend_value<int>(*wf, -0x3);
-            pm_tiny::fappend_value(*wf, "create `" + name + "` fail");
-        } else {
-            int ret = pm_tiny_server.start_and_add_prog(prog);
-            if (ret == -1) {
-                std::string errmsg(strerror(errno));
-                pm_tiny::fappend_value<int>(*wf, -1);
-                pm_tiny::fappend_value(*wf, errmsg);
-            } else {
-                if (show_log) {
-                    prog_bind_session(prog, wf);
-                } else {
-                    pm_tiny::fappend_value<int>(*wf, 0);
-                    pm_tiny::fappend_value(*wf, "success");
-                }
-            }
-        }
-    } else {
-        prog_ptr_t _p = *iter;
-        if (_p->pid == -1) {
-            prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
-            if (local_resolved && prog
-                && (prog->work_dir != _p->work_dir || prog->args != _p->args)) {
-                pm_tiny::fappend_value<int>(*wf, -4);
-                pm_tiny::fappend_value(*wf, "The cwd or command or environ has changed,"
-                                            " please run the delete operation first");
-            } else {
-                _p->envs = envs;
-                int rc = pm_tiny_server.start_prog(_p);
-                if (rc == -1) {
-                    std::string errmsg(strerror(errno));
-                    pm_tiny::fappend_value<int>(*wf, -1);
-                    pm_tiny::fappend_value(*wf, errmsg);
-                } else {
-                    if(show_log){
-                        prog_bind_session(_p,wf);
-                    }else {
-                        pm_tiny::fappend_value<int>(*wf, 0);
-                        pm_tiny::fappend_value(*wf, "success");
-                    }
-                }
-            }
-        } else {
-            pm_tiny::fappend_value<int>(*wf, -2);
-            pm_tiny::fappend_value(*wf, "`" + name + "` already running");
-        }
-    }
-    return wf;
-}
-
-pm_tiny::frame_ptr_t make_prog_info_data(proglist_t &pm_tiny_progs) {
-    //n pid:name:workdir:command:restart_count:state:VmRSSkiB
-    auto f = std::make_shared<pm_tiny::frame_t>();
-    pm_tiny::fappend_value<int>(*f, (int) pm_tiny_progs.size());
-    for (auto &prog_info: pm_tiny_progs) {
-        pm_tiny::fappend_value(*f, (int) prog_info->pid);
-        pm_tiny::fappend_value(*f, prog_info->name);
-        pm_tiny::fappend_value(*f, prog_info->work_dir);
-        std::string command = std::accumulate(prog_info->args.begin(), prog_info->args.end(),
-                                              std::string(),
-                                              [](const std::string &lv, const std::string &rv) {
-                                                  std::string v = lv + " ";
-                                                  v += rv;
-                                                  return v;
-                                              });
-        mgr::utils::trim(command);
-        pm_tiny::fappend_value(*f, command);
-        pm_tiny::fappend_value(*f, prog_info->dead_count);
-        pm_tiny::fappend_value(*f, prog_info->state);
-        long long VmRSSkiB = 0;
-        if (prog_info->pid > 0) {
-            VmRSSkiB = pm_tiny::get_vm_rss_kib(prog_info->pid);
-        }
-        pm_tiny::fappend_value(*f,VmRSSkiB);
-    }
-    return f;
-}
-
 void check_listen_sock_has_event(int sock_fd,
                                  std::vector<pm_tiny::session_ptr_t> &sessions,
                                  int &_readyfd, fd_set &rfds) {
     int cfd;
-    struct sockaddr_un peer_addr;
+    struct sockaddr_un peer_addr{};
     socklen_t peer_addr_size = sizeof(struct sockaddr_un);
     if (FD_ISSET(sock_fd, &rfds)) {
         cfd = accept4(sock_fd, (struct sockaddr *) &peer_addr,
-                      &peer_addr_size, SOCK_NONBLOCK);
-        pm_tiny::logger->debug("accept fd:%d\n", cfd);
+                      &peer_addr_size, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        PM_TINY_LOG_D("accept fd:%d\n", cfd);
         sessions.emplace_back(std::make_shared<pm_tiny::session_t>(cfd, 0));
         _readyfd++;
     }
@@ -967,7 +698,8 @@ void check_prog_has_event(int total_ready_fd, proglist_t &pm_tiny_progs,
 
 int create_lock_pid_file(const char *filepath) {
     char str[20];
-    int lfp = open(filepath, O_RDWR | O_CREAT | O_TRUNC, 0640);
+    int lfp = open(filepath,
+                   O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
     if (lfp < 0) {
         perror("open");
         return -1; /* can not open */
@@ -978,7 +710,11 @@ int create_lock_pid_file(const char *filepath) {
     }
     /* first instance continues */
     sprintf(str, "%d", getpid());
-    write(lfp, str, strlen(str)); /* record pid to lockfile */
+    auto rc = write(lfp, str, strlen(str)); /* record pid to lockfile */
+    if (rc == -1) {
+        perror("write pid fail");
+        return -1;
+    }
     return lfp;
 }
 
@@ -1005,16 +741,24 @@ static void daemonize() {
     setsid(); /* obtain a new process group */
     for (i = getdtablesize() - 1; i >= 0; --i) close(i); /* close all descriptors */
     i = open("/dev/null", O_RDWR);
-    dup(i);
-    dup(i); /* handle standart I/O */
+    auto rc = dup(i);
+    if (rc == -1) {
+        perror("dup fail");
+    }
+    rc = dup(i); /* handle standart I/O */
+    if (rc == -1) {
+        perror("dup fail");
+    }
     umask(027); /* set newly created file permissions */
-    chdir("/");
+    rc = chdir("/");
+    if (rc == -1) {
+        perror("chdir");
+    }
 }
 
 struct command_args {
     int daemon = 0;
     std::string cfg_file;
-    std::string home_dir;
 };
 
 int parse_command_args(int argc, char **argv,
@@ -1022,16 +766,13 @@ int parse_command_args(int argc, char **argv,
     int index;
     int c;
     opterr = 0;
-    while ((c = getopt(argc, argv, "dc:e:")) != -1)
+    while ((c = getopt(argc, argv, "dc:")) != -1)
         switch (c) {
             case 'd':
                 args.daemon = 1;
                 break;
             case 'c':
                 args.cfg_file = optarg;
-                break;
-            case 'e':
-                args.home_dir = optarg;
                 break;
             case '?':
                 if (isprint(optopt))
@@ -1050,27 +791,21 @@ int parse_command_args(int argc, char **argv,
 
 
 int main(int argc, char *argv[]) {
-    pm_tiny::logger = std::make_shared<pm_tiny::logger_t>();
+    pm_tiny::initialize();
     command_args args;
     int rc = 0;
     int exists = 0;
     parse_command_args(argc, argv, args);
     char cfg_path[PATH_MAX] = {0};
-    char home_path[PATH_MAX] = {0};
     if (!args.cfg_file.empty()) {
-        if (realpath(args.cfg_file.c_str(), cfg_path) == NULL) {
+        if (realpath(args.cfg_file.c_str(), cfg_path) == nullptr) {
             PM_TINY_LOG_E_SYS("%s realpath", args.cfg_file.c_str());
             exit(EXIT_FAILURE);
         }
     }
-    if (!args.home_dir.empty()) {
-        if (realpath(args.home_dir.c_str(), home_path) == NULL) {
-            PM_TINY_LOG_E_SYS("%s realpath", args.home_dir.c_str());
-            exit(EXIT_FAILURE);
-        }
-    }
-    std::string pm_tiny_home_dir = pm_tiny::get_pm_tiny_home_dir(home_path);
-    std::string pm_lock_file = pm_tiny_home_dir + "/" + "pm_tiny.pid";
+    auto pm_tiny_cfg = pm_tiny::get_pm_tiny_config(cfg_path);
+    std::string pm_tiny_home_dir = pm_tiny_cfg->pm_tiny_home_dir;
+    std::string pm_tiny_lock_file = pm_tiny_cfg->pm_tiny_lock_file;
     exists = pm_tiny::is_directory_exists(pm_tiny_home_dir.c_str());
     PM_TINY_LOG_D("pm_tiny home:%s", pm_tiny_home_dir.c_str());
     if (exists == -1) {
@@ -1084,10 +819,10 @@ int main(int argc, char *argv[]) {
             exit(EXIT_FAILURE);
         }
     }
-    std::string pm_tiny_log_file = pm_tiny_home_dir + "/pm_tiny.log";
-    std::string pm_tiny_cfg_file = cfg_path;
-    std::string pm_tiny_app_log_dir = pm_tiny_home_dir + "/logs";
-    std::string pm_tiny_app_environ_dir = pm_tiny_home_dir + "/environ";
+    std::string pm_tiny_log_file = pm_tiny_cfg->pm_tiny_log_file;
+    std::string pm_tiny_prog_cfg_file = pm_tiny_cfg->pm_tiny_prog_cfg_file;
+    std::string pm_tiny_app_log_dir = pm_tiny_cfg->pm_tiny_app_log_dir;
+    std::string pm_tiny_app_environ_dir = pm_tiny_cfg->pm_tiny_app_environ_dir;
     auto mkdir_if_need = [](const std::string &dir) {
         int exists = pm_tiny::is_directory_exists(dir.c_str());
         if (exists == -1) {
@@ -1104,28 +839,22 @@ int main(int argc, char *argv[]) {
     };
     mkdir_if_need(pm_tiny_app_log_dir);
     mkdir_if_need(pm_tiny_app_environ_dir);
-    if (pm_tiny_cfg_file.empty()) {
-        pm_tiny_cfg_file = pm_tiny_home_dir + "/prog.cfg";
-    }
-    setenv("PM_TINY_HOME", pm_tiny_home_dir.c_str(), 0);
-    setenv("PM_TINY_LOG_FILE", pm_tiny_log_file.c_str(), 1);
-    setenv("PM_TINY_APP_LOG_DIR", pm_tiny_app_log_dir.c_str(), 1);
-    setenv("PM_TINY_CFG_FILE", pm_tiny_cfg_file.c_str(), 1);
     if (args.daemon) {
         daemonize();
     }
-    pm_tiny::logger = std::make_shared<pm_tiny::logger_t>(pm_tiny_log_file.c_str());
-    int lock_fp = create_lock_pid_file(pm_lock_file.c_str());
+    pm_tiny::logger = std::make_unique<pm_tiny::logger_t>(pm_tiny_log_file.c_str());
+    int lock_fp = create_lock_pid_file(pm_tiny_lock_file.c_str());
     if (lock_fp < 0) {
         exit(EXIT_FAILURE);
     }
     pm_tiny_server_t pm_tiny_server;
     pm_tiny_server.pm_tiny_home_dir = pm_tiny_home_dir;
-    pm_tiny_server.pm_tiny_cfg_file = pm_tiny_cfg_file;
+    pm_tiny_server.pm_tiny_prog_cfg_file = pm_tiny_prog_cfg_file;
     pm_tiny_server.pm_tiny_log_file = pm_tiny_log_file;
     pm_tiny_server.pm_tiny_app_log_dir = pm_tiny_app_log_dir;
     pm_tiny_server.pm_tiny_app_environ_dir = pm_tiny_app_environ_dir;
+    pm_tiny_server.pm_tiny_sock_file = pm_tiny_cfg->pm_tiny_sock_file;
     start(pm_tiny_server);
-    delete_lock_pid_file(lock_fp, pm_lock_file.c_str());
+    delete_lock_pid_file(lock_fp, pm_tiny_lock_file.c_str());
     return 0;
 }

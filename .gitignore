@@ -1,2 +1,4 @@
 /cmake-build-*
 /.idea
+/dependencies
+/.ax_build

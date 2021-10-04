@@ -4,8 +4,10 @@
 #include "pm_tiny_server.h"
 #include "log.h"
 #include "globals.h"
+#include "prog_cfg.h"
 #include <termios.h>
 #include <unistd.h>
+#include <algorithm>
 
 namespace pm_tiny {
 
@@ -28,86 +30,76 @@ namespace pm_tiny {
 
 
     int pm_tiny_server_t::parse_cfg() {
-        return parse_cfg(this->pm_tiny_progs);
+        parse_cfg(this->pm_tiny_progs);
+        auto progs = std::vector<prog_ptr_t>(pm_tiny_progs.begin(), pm_tiny_progs.end());
+        this->progDAG = check_prog_info(progs);
+        return this->progDAG != nullptr ? 0 : -1;
+    }
+
+    std::unique_ptr<reload_config_t>
+    pm_tiny_server_t::parse_cfg2() {
+        proglist_t pl;
+        parse_cfg(pl);
+        auto progs = std::vector<prog_ptr_t>(pl.begin(), pl.end());
+        auto dag = check_prog_info(progs);
+        auto rconfig=std::make_unique<reload_config_t>(std::move(pl),std::move(dag));
+        return rconfig;
+    }
+
+    bool pm_tiny_server_t::is_prog_depends_valid(prog_ptr_t prog) {
+        auto progs = std::vector<prog_ptr_t>(this->pm_tiny_progs.begin(), this->pm_tiny_progs.end());
+        progs.push_back(prog);
+        auto dag = check_prog_info(progs);
+        return dag != nullptr;
     }
 
     void pm_tiny_server_t::parse_app_environ(const std::string &name,
-                           std::vector <std::string> &envs) const {
-        std::fstream efs(this->pm_tiny_app_environ_dir + "/" + name);
-        if (!efs) {
-            logger->debug("%s environ not exists", name.c_str());
-            for (char **env = environ; *env != nullptr; env++) {
-                envs.emplace_back(*env);
-            }
-            return;
-        }
-
-        for (std::string line; std::getline(efs, line);) {
-            mgr::utils::trim(line);
-            if (line.empty())continue;
-            envs.emplace_back(line);
+                                             std::vector<std::string> &envs) const {
+        auto app_envs = load_app_environ(name, this->pm_tiny_app_environ_dir);
+        for (auto &env: app_envs) {
+            envs.push_back(env);
         }
     }
 
     int pm_tiny_server_t::parse_cfg(proglist_t &progs) const {
-        const std::string &cfg_path = this->pm_tiny_cfg_file;
-        const std::string &app_log_dir = this->pm_tiny_app_log_dir;
-        std::fstream cfg_file(cfg_path);
-        if (!cfg_file) {
-            logger->debug("not found cfg\n");
-            return 0;
-        }
-        for (std::string line; std::getline(cfg_file, line);) {
-            mgr::utils::trim(line);
-            if (!line.empty() && line[0] != '#') {
-                auto elements = mgr::utils::split(line, {':'});
-                if (elements.size() < 3) {
-                    continue;
-                }
-                for (auto &v: elements) {
-                    mgr::utils::trim(v);
-                }
-                auto &app_name = elements[0];
-                const auto iter = std::find_if(progs.begin(), progs.end(),
-                                               [&app_name](const prog_ptr_t &prog) {
-                                                   return prog->name == app_name;
-                                               });
-                if (iter != progs.end()) {
-                    logger->info("name %s already exists ignore", app_name.c_str());
-                    continue;
-                }
-                std::vector <std::string> envs;
-                parse_app_environ(app_name, envs);
-                int kill_timeout_s=3;
-                std::string run_as;
-                if (elements.size() > 3) {
-                    try {
-                        kill_timeout_s = std::stoi(elements[3]);
-                    } catch (const std::exception &ex) {
-                        //ignore
-                    }
-                    if (elements.size() > 4) {
-                        run_as = elements[4];
-                    }
-                }
-                auto prog_info = create_prog(app_name, elements[1], elements[2],
-                                             envs,kill_timeout_s,run_as);
-                if (prog_info) {
-                    progs.push_back(prog_info);
-                }
+        const std::string &cfg_path = this->pm_tiny_prog_cfg_file;
+        auto prog_cfgs = load_prog_cfg(cfg_path,
+                                       this->pm_tiny_app_environ_dir);
+
+        for (const auto &prog_cfg: prog_cfgs) {
+            auto &app_name = prog_cfg.name;
+            const auto iter = std::find_if(progs.begin(), progs.end(),
+                                           [&app_name](const prog_ptr_t &prog) {
+                                               return prog->name == app_name;
+                                           });
+            if (iter != progs.end()) {
+                PM_TINY_LOG_I("name %s already exists ignore", app_name.c_str());
+                continue;
+            }
+            std::vector<std::string> envs = prog_cfg.envs;
+            int kill_timeout_s = prog_cfg.kill_timeout_s;
+            std::string run_as = prog_cfg.run_as;
+            auto prog_info = create_prog(app_name, prog_cfg.cwd, prog_cfg.command,
+                                         envs, kill_timeout_s, run_as);
+            if (prog_info) {
+                prog_info->depends_on = prog_cfg.depends_on;
+                prog_info->start_timeout = prog_cfg.start_timeout;
+                prog_info->failure_action = prog_cfg.failure_action;
+                prog_info->daemon = prog_cfg.daemon;
+                prog_info->heartbeat_timeout = prog_cfg.heartbeat_timeout;
+                progs.push_back(prog_info.release());
             }
         }
         return 0;
     }
 
-    prog_ptr_t pm_tiny_server_t::create_prog(const std::string &app_name,
-                           const std::string &cwd,
-                           const std::string &command,
-                           const std::vector <std::string> &envs,
-                           int kill_timeout_sec,const std::string&run_as) const {
-        const std::string &cfg_path = this->pm_tiny_cfg_file;
+    std::unique_ptr<prog_info_t> pm_tiny_server_t::create_prog(const std::string &app_name,
+                                             const std::string &cwd,
+                                             const std::string &command,
+                                             const std::vector<std::string> &envs,
+                                             int kill_timeout_sec, const std::string &run_as) const {
         const std::string &app_log_dir = this->pm_tiny_app_log_dir;
-        auto prog_info = std::make_shared<pm_tiny::prog_info_t>();
+        auto prog_info = std::make_unique<pm_tiny::prog_info_t>();
         prog_info->rpipefd[0] = prog_info->rpipefd[1] = -1;
         prog_info->logfile_fd[0] = prog_info->logfile_fd[1] = -1;
 #if !PM_TINY_PTY_ENABLE
@@ -140,11 +132,11 @@ namespace pm_tiny {
             logger->info("%s args is empty ignore", app_name.c_str());
             return nullptr;
         }
-        if (kill_timeout_sec < 1 || kill_timeout_sec > 15) {
+        if (kill_timeout_sec < 1) {
             kill_timeout_sec = 3;
         }
         prog_info->kill_timeout_sec = kill_timeout_sec;
-        prog_info->run_as=run_as;
+        prog_info->run_as = run_as;
         return prog_info;
     }
 
@@ -158,6 +150,9 @@ namespace pm_tiny {
 
     int pm_tiny_server_t::start_prog(const prog_ptr_t &prog) {
         if (prog->pid == -1) {
+            if (prog->state == PM_TINY_PROG_STATE_WAITING_START) {
+                this->remove_from_DAG(prog);
+            }
             int ret = spawn_prog(*prog);
             if (ret != -1) {
                 prog->init_prog_log();
@@ -209,45 +204,39 @@ namespace pm_tiny {
 
         tcsetattr_stdin_TCSANOW(&tty);
     }
+
     int pm_tiny_server_t::save_proc_to_cfg() {
         //name:cwd:command
-        const std::string &cfg_path = this->pm_tiny_cfg_file;
-        const std::string &app_log_dir = this->pm_tiny_app_log_dir;
-        std::stringstream ss;
-        std::vector <std::tuple<std::string, std::string>> f_envs;
+        const std::string &cfg_path = this->pm_tiny_prog_cfg_file;
+        std::vector<prog_cfg_t> prog_cfgs;
+
         std::for_each(this->pm_tiny_progs.begin(), this->pm_tiny_progs.end(),
-                      [&ss, &f_envs](const prog_ptr_t &p) {
+                      [&prog_cfgs](const prog_ptr_t &p) {
                           std::string command = std::accumulate(p->args.begin(), p->args.end(),
                                                                 std::string(""),
                                                                 [](const std::string &s1, const std::string &s2) {
                                                                     return s1 + (s2 + " ");
                                                                 });
                           mgr::utils::trim(command);
-                          ss << p->name << ":" << p->work_dir << ":" << command
-                             << ":" << p->kill_timeout_sec << ":" << p->run_as << "\n";
-                          std::stringstream env_ss;
-                          for (auto &env: p->envs) {
-                              env_ss << env << "\n";
-                          }
-                          f_envs.emplace_back(std::make_tuple(p->name, env_ss.str()));
+                          prog_cfg_t prog_cfg;
+                          prog_cfg.command = command;
+                          prog_cfg.cwd = p->work_dir;
+                          prog_cfg.name = p->name;
+                          prog_cfg.kill_timeout_s = p->kill_timeout_sec;
+                          prog_cfg.run_as = p->run_as;
+                          prog_cfg.envs = p->envs;
+                          prog_cfg.depends_on = p->depends_on;
+                          prog_cfg.daemon = p->daemon;
+                          prog_cfg.start_timeout = p->start_timeout;
+                          prog_cfg.failure_action = p->failure_action;
+                          prog_cfg.heartbeat_timeout = p->heartbeat_timeout;
+                          prog_cfgs.push_back(prog_cfg);
+
                       });
-        std::fstream cfg_file(cfg_path, std::ios::out | std::ios::trunc);
-        if (!cfg_file) {
-            logger->debug("not found cfg\n");
-            return -1;
-        }
-        cfg_file << ss.str();
-        for (auto &env: f_envs) {
-            std::string f_name = std::get<0>(env);
-            std::string content = std::get<1>(env);
-            std::fstream env_fs(this->pm_tiny_app_environ_dir + "/" + f_name, std::ios::out | std::ios::trunc);
-            if (!env_fs) {
-                logger->debug("%s write fail", f_name.c_str());
-            }
-            env_fs << content;
-        }
+        save_prog_cfg(prog_cfgs, cfg_path, this->pm_tiny_app_environ_dir);
         return 0;
     }
+
     void pm_tiny_server_t::restart_startfailed() {
         for (auto &prog: pm_tiny_progs) {
             if (prog->pid == -1
@@ -261,18 +250,86 @@ namespace pm_tiny {
         }
     }
 
-    void pm_tiny_server_t::spawn() {
-        for (auto &prog: pm_tiny_progs) {
+    proglist_t pm_tiny_server_t::spawn0(proglist_t &start_progs) {
+        proglist_t fail_progs;
+        std::stringstream ss;
+        ss<<"[";
+        for (auto &prog: start_progs) {
+            ss<<prog->name<<" ";
             if (prog->pid == -1) {
                 auto retv = spawn_prog(*prog);
                 if (retv == -1) {
+                    fail_progs.push_back(prog);
+                    flag_startup_fail(prog);
                     continue;
                 }
                 prog->init_prog_log();
             }
         }
+        ss<<"]";
+        PM_TINY_LOG_D("start:%s",ss.str().c_str());
+        return fail_progs;
     }
-    void  pm_tiny_server_t::close_fds() {
+
+    auto get_alarm_time = [](proglist_t &start_progs,
+                             proglist_t &fail_progs) {
+        for (const auto &p: fail_progs) {
+            start_progs.remove(p);
+        }
+        auto alarm_time = get_min_start_timeout(start_progs);
+        return alarm_time;
+    };
+    void pm_tiny_server_t::async_kill_prog(prog_ptr_t&prog_){
+        auto old_state = prog_->state;
+        prog_->async_kill_prog();
+        if (old_state == PM_TINY_PROG_STATE_STARTING
+            && !this->progDAG->is_traversal_complete()) {
+            PM_TINY_LOG_D("current prog name:%s,trigger DAG next",prog_->name.c_str());
+            prog_->kill_pendingtasks.emplace_back(
+                    [prog_](pm_tiny_server_t &pm_tiny_server) {
+                        if (pm_tiny_server.is_exiting()) {
+                            return;
+                        }
+                        proglist_t pl;
+                        pl.push_back(prog_);
+                        pm_tiny_server.spawn1(pl);
+                    });
+        }
+    }
+
+    void pm_tiny_server_t::spawn1(proglist_t &started_progs) {
+//        while (!started_progs.empty()) {
+        if (this->progDAG->is_traversal_complete()) {
+            PM_TINY_LOG_D("traversal complete");
+            return;
+        }
+        std::stringstream ss;
+        for (auto p: started_progs) {
+            ss << p->name << ",";
+        }
+        auto info = ss.str();
+        if (!info.empty()) {
+            info.erase(info.end() - 1);
+        }
+        PM_TINY_LOG_D("trigger node:%s", info.c_str());
+        auto start_progs = this->progDAG->next(started_progs);
+        if (start_progs.empty()) {
+            PM_TINY_LOG_D("DAG next start empty");
+            return;
+        }
+        this->spawn0(start_progs);
+//        }
+    }
+
+    void pm_tiny_server_t::spawn() {
+        for (auto &p: pm_tiny_progs) {
+            p->state = PM_TINY_PROG_STATE_WAITING_START;
+        }
+        proglist_t start_progs = this->progDAG->start();
+        spawn0(start_progs);
+    }
+
+    void pm_tiny_server_t::close_fds() {
         for (auto &prog_info: pm_tiny_progs) {
             prog_info->close_fds();
         }
@@ -309,17 +366,17 @@ namespace pm_tiny {
 #endif
         sigset_t omask;
         /* Careful: don't be affected by a signal in vforked child */
-        mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK,&omask);
+        mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK, &omask);
         pid_t pid = vfork();
         if (pid < 0) {
             tmp_errno = errno;
-            sigprocmask(SIG_SETMASK,&omask, nullptr);
+            sigprocmask(SIG_SETMASK, &omask, nullptr);
             logger->syscall_errorlog("vfork");
             errno = tmp_errno;
             return -1;
         }
         if (pid > 0) {
-            sigprocmask(SIG_SETMASK,&omask, nullptr);
+            sigprocmask(SIG_SETMASK, &omask, nullptr);
             prog.pid = pid;
             prog.backup_pid = pid;
 #if !PM_TINY_PTY_ENABLE
@@ -335,7 +392,7 @@ namespace pm_tiny {
             prog.rpipefd[0] = pti.master_fd;
 #endif
             prog.last_startup_ms = pm_tiny::time::gettime_monotonic_ms();
-            logger->info("startup %s pid:%d\n", prog.name.c_str(), pid);
+            PM_TINY_LOG_I("startup `%s` pid:%d\n", prog.name.c_str(), pid);
         } else {
             /* Reset signal handlers that were set by the parent process */
             reset_sighandlers_and_unblock_sigs();
@@ -365,10 +422,6 @@ namespace pm_tiny {
                 _exit(112);
             }
 #endif
-
-            for (int i = getdtablesize() - 1; i > 2; --i) {
-                close(i);
-            }
             int rc;
 //            rc = pm_tiny::set_sigaction(SIGPIPE, SIG_DFL);
 //            if (rc == -1) {
@@ -395,16 +448,29 @@ namespace pm_tiny {
                 }
             }
             char *args[80] = {nullptr};
-            for (int i = 0; i < prog.args.size() && i < (sizeof(args) / sizeof(args[0])); i++) {
+            for (int i = 0; i < static_cast<int>(prog.args.size())
+                            && i < static_cast<int>(sizeof(args) / sizeof(args[0])); i++) {
                 args[i] = (char *) prog.args[i].c_str();
             }
-            char *envp[4096];
-            memset(&envp, 0, sizeof(envp));
-            for (int i = 0; i < prog.envs.size()
-                            && (i < ((sizeof(envp) / sizeof(envp[0])) - 1)); i++) {
-                envp[i] = (char *) prog.envs[i].data();
+            std::vector<char *> envp;
+            envp.reserve(prog.envs.size() + 4);
+            std::string app_id_env = PM_TINY_APP_NAME "=";
+            app_id_env += prog.name;
+            std::string home_dir_env = PM_TINY_HOME "=";
+            home_dir_env += this->pm_tiny_home_dir;
+            std::string socket_path = PM_TINY_SOCK_FILE "=";
+            socket_path += this->pm_tiny_sock_file;
+            envp.push_back(const_cast<char *>(app_id_env.c_str()));
+            envp.push_back(const_cast<char *>(home_dir_env.c_str()));
+            envp.push_back(const_cast<char *>(socket_path.c_str()));
+            for (const auto &env: prog.envs) {
+                if (env.rfind("PM_TINY_", 0) == 0) {
+                    continue;
+                }
+                envp.push_back(const_cast<char *>(env.c_str()));
             }
-            execvpe(args[0], args, envp);
+            envp.push_back(nullptr);
+            execvpe(args[0], args, envp.data());
             failed = errno;
             _exit(111);
         }
@@ -416,11 +482,11 @@ namespace pm_tiny {
             pm_tiny::safe_waitpid(pid, nullptr, 0); /* prevent zombie */
             errno = failed;
             prog.state = PM_TINY_PROG_STATE_STARTUP_FAIL;
-            logger->syscall_errorlog("%s startup fail", prog.name.c_str());
+            PM_TINY_LOG_E_SYS("`%s` startup fail", prog.name.c_str());
             errno = failed;
             return -1;
         } else {
-            prog.state = PM_TINY_PROG_STATE_RUNING;
+            prog.state = PM_TINY_PROG_STATE_STARTING;
         }
         return 0;
     }
@@ -445,9 +511,9 @@ namespace pm_tiny {
 
     prog_ptr_t pm_tiny_server_t::find_prog(int pid) {
         auto iter = std::find_if(this->pm_tiny_progs.begin(), this->pm_tiny_progs.end(),
-                              [&pid](const prog_ptr_t &p) {
-                                  return p->pid == pid;
-                              });
+                                 [&pid](const prog_ptr_t &p) {
+                                     return p->pid == pid;
+                                 });
         if (iter == this->pm_tiny_progs.end()) {
             return nullptr;
         }
@@ -458,7 +524,7 @@ namespace pm_tiny {
         do {
             DIR *procdir = opendir(procdir_path);
             if (procdir == nullptr) {
-                logger->syscall_errorlog("cannot open %s dir",procdir_path);
+                logger->syscall_errorlog("cannot open %s dir", procdir_path);
                 break;
             }
             while (true) {
@@ -482,10 +548,10 @@ namespace pm_tiny {
                 int rc = pm_tiny::utils::proc::get_proc_info(pid, procinfo);
                 if (rc == 0) {
                     using namespace std::string_literals;
-                    auto is_equal = [](const std::vector <std::string> &v1,
-                                       const std::vector <std::string> &v2) {
+                    auto is_equal = [](const std::vector<std::string> &v1,
+                                       const std::vector<std::string> &v2) {
                         if (v1.size() != v2.size())return false;
-                        for (int i = 0; i < v1.size(); i++) {
+                        for (std::vector<std::string>::size_type i = 0; i < v1.size(); i++) {
                             if (v1[i] != v2[i]) {
                                 return false;
                             }
@@ -493,11 +559,11 @@ namespace pm_tiny {
                         return true;
                     };
                     if (is_equal(procinfo.cmdline, prog.args)) {
-                        auto cmd=mgr::utils::join(procinfo.cmdline);
+                        auto cmd = mgr::utils::join(procinfo.cmdline);
                         PM_TINY_LOG_I("found detach pid:%d exe:%s cmdline:%s comm:%s",
-                                     pid, procinfo.exe_path.c_str(),
-                                     cmd.c_str(), procinfo.comm.c_str());
-                        pm_tiny::safe_kill_process(pid,prog.kill_timeout_sec);
+                                      pid, procinfo.exe_path.c_str(),
+                                      cmd.c_str(), procinfo.comm.c_str());
+                        pm_tiny::safe_kill_process(pid, prog.kill_timeout_sec);
                     }
                 } else {
 //                logger->syscall_errorlog("get_exe_path");
@@ -506,5 +572,95 @@ namespace pm_tiny {
             closedir(procdir);
         } while (false);
         return real_spawn_prog(prog);
+    }
+
+    void pm_tiny_server_t::trigger_DAG_traversal_next_node(const prog_ptr_t &prog) {
+        if (prog->state == PM_TINY_PROG_STATE_WAITING_START) {
+            proglist_t pl;
+            pl.push_back(prog);
+            this->progDAG->remove(pl);
+            this->spawn1(pl);
+        }
+    }
+
+    void pm_tiny_server_t::remove_from_DAG(const prog_ptr_t &prog) {
+        PM_TINY_LOG_D("%s",prog->name.c_str());
+        proglist_t pl;
+        pl.push_back(prog);
+        this->progDAG->remove(pl);
+    }
+
+    void pm_tiny_server_t::remove_prog(prog_ptr_t &prog) {
+        pm_tiny_progs.remove(prog);
+        for (auto &p: pm_tiny_progs) {
+            auto &deps = p->depends_on;
+            auto iter = std::find(deps.begin(), deps.end(), prog->name);
+            if (iter != deps.end()) {
+                deps.erase(iter);
+            }
+        }
+        pm_tiny::delete_prog(prog);
+        prog = nullptr;
+    }
+
+    void pm_tiny_server_t::flag_startup_fail(prog_ptr_t &prog) const {
+        auto &graph = progDAG->graph;
+        auto vertex_i = graph->vertex_index([&](auto &wrapper) {
+            return wrapper.prog_info == prog;
+        });
+        if (vertex_i != pm_tiny::prog_graph_t::npos) {
+            PM_TINY_LOG_D("vertex_i:%d", vertex_i);
+            auto vertices = graph->bfs(vertex_i);
+            std::sort(vertices.begin(), vertices.end(), std::greater<>());
+            std::stringstream ss;
+            for (auto ver: vertices) {
+                ss << ver << ",";
+            }
+            PM_TINY_LOG_D("delete:%s", ss.str().c_str());
+            for (auto ver: vertices) {
+                graph->vertex(ver).prog_info->state = PM_TINY_PROG_STATE_STARTUP_FAIL;
+                graph->remove_vertex(ver);
+            }
+        }
+    }
+
+    void pm_tiny_server_t::show_prog_depends_info() const {
+        if (this->pm_tiny_progs.empty()) {
+            PM_TINY_LOG_D("progs empty");
+        } else {
+            if (this->progDAG) {
+                this->progDAG->show_depends_info();
+            }
+        }
+    }
+
+    void pm_tiny_server_t::request_quit() {
+        if (is_exiting()) {
+            return;
+        }
+        this->server_exit = 1;
+        for (auto prog: this->pm_tiny_progs) {
+            if (prog->pid != -1) {
+                prog->async_kill_prog();
+                prog->execute_penddingtasks(*this);
+            }
+            if (prog->state == PM_TINY_PROG_STATE_WAITING_START) {
+                prog->state = PM_TINY_PROG_STATE_NO_RUN;
+            }
+        }
+    }
+
+    void pm_tiny_server_t::swap_reload_config() {
+        this->pm_tiny_progs = std::move(this->reload_config->pl_);
+        this->progDAG = std::move(this->reload_config->dag_);
+        this->reload_config.reset();
+    }
+
+    bool pm_tiny_server_t::is_reloading() const {
+        return server_exit != 0 && reload_config != nullptr;
+    }
+
+    bool pm_tiny_server_t::is_exiting() const {
+        return this->server_exit != 0;
     }
 }

@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <sys/fcntl.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <pwd.h>
 #include <stdlib.h>
@@ -26,6 +27,14 @@ namespace pm_tiny {
             rc = ::read(fd, buf, nbytes);
         } while (rc == -1 && errno == EINTR);
         return rc;
+    }
+
+    ssize_t safe_send(int fd, const void *buf, size_t n, int flags) {
+        ssize_t nbytes;
+        do {
+            nbytes = ::send(fd, buf, n, flags);
+        } while (nbytes == -1 && errno == EINTR);
+        return nbytes;
     }
 
     ssize_t safe_write(int fd, const void *buf, size_t n) {
@@ -47,8 +56,20 @@ namespace pm_tiny {
 
     int set_nonblock(int fd) {
         int flags = fcntl(fd, F_GETFL);
+        if (flags == -1) {
+            return -1;
+        }
         flags |= O_NONBLOCK;
         return fcntl(fd, F_SETFL, flags);
+    }
+
+    int set_cloexec(int fd) {
+        int flags = fcntl(fd, F_GETFD);
+        if (flags == -1) {
+            return -1;
+        }
+        flags |= FD_CLOEXEC;
+        return fcntl(fd, F_SETFD, flags);
     }
 
     int set_sigaction(int sig, sighandler_t sighandler) {
@@ -197,9 +218,8 @@ namespace pm_tiny {
     int get_uid_from_username(const char *name, passwd_t &passwd_) {
         struct passwd pwd;
         struct passwd *result;
-        size_t bufsize;
         int s;
-        bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
+        auto bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
         if (bufsize == -1) {          /* Value was indeterminate */
             bufsize = 16384;        /* Should be more than enough */
         }
@@ -262,5 +282,25 @@ namespace pm_tiny {
 
     int tcsetattr_stdin_TCSANOW(const struct ::termios *tp) {
         return tcsetattr(STDIN_FILENO, TCSANOW, tp);
+    }
+
+    void process_reboot() {
+
+        if (!debug_mode) {
+            /* Terminate all monitored processes */
+            kill(0, SIGTERM);
+
+            /* Terminate init, reboot the system */
+            kill(1, SIGTERM);
+        } else {
+            const char msg[] = "pm_tiny: Reboot disabled in debug mode, exiting.\n";
+
+            /* Display reboot message */
+            ::write(STDERR_FILENO, msg, sizeof(msg));
+
+            /* Exit abnormally */
+//            exit(1);
+            kill(getpid(),SIGTERM);
+        }
     }
 }

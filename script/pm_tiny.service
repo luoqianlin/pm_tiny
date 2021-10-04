@@ -1,0 +1,17 @@
+[Unit]
+Description=pm_tiny server
+After=network.target auditd.service
+
+[Service]
+ExecStart=/usr/local/bin/pm_tiny
+ExecReload=/usr/local/bin/pm reload
+ExecStop=/usr/local/bin/pm quit
+KillMode=process
+Restart=on-abort
+RestartPreventExitStatus=1
+Type=simple
+
+
+[Install]
+WantedBy=multi-user.target
+Alias=pm_tiny.service

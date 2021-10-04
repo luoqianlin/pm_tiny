@@ -24,7 +24,7 @@ namespace pm_tiny {
     std::ostream &operator<<(std::ostream &os, frame_t const &f) {
         std::stringstream ss;
         ss << std::hex << std::uppercase << std::setfill('0');
-        for (int i = 0; i < f.size(); i++) {
+        for (frame_t::size_type i = 0; i < f.size(); i++) {
             ss << std::setw(2) << static_cast<int>(f[i]) << " ";
         }
         os << ss.str();
@@ -77,8 +77,7 @@ namespace pm_tiny {
         if (nread == 0) {
             this->close();
         } else {
-            std::shared_ptr<uint8_t> s_buf(new uint8_t[nread],
-                                           std::default_delete<uint8_t[]>());
+            std::unique_ptr<uint8_t[]> s_buf(new uint8_t[nread]);
 
             auto buf = s_buf.get();
             ssize_t rc;
@@ -92,14 +91,21 @@ namespace pm_tiny {
                 return -1;
             }
             nread = (int) rc;
-            auto f = this->recv_buf.back();
             for (int i = 0; i < nread; i++) {
                 if (buf[i] == frame_delimiter) {
-                    this->recv_buf.emplace_back(std::make_shared<frame_t>());
-                    f = this->recv_buf.back();
+                    if (!recv_frame_buf_.empty()) {
+                        this->recv_buf.emplace_back(std::make_unique<frame_t>(recv_frame_buf_));
+                        recv_frame_buf_.clear();
+                    }
                 } else {
-                    f->emplace_back(buf[i]);
+                    recv_frame_buf_.push_back(buf[i]);
                 }
+            }
+            if (recv_frame_buf_.size() >= frame_max_length) {
+                const char *log = "Maximum frame size exceeded, close session!!!\n";
+                ::write(STDOUT_FILENO, log, strlen(log));
+                this->close();
+                return 0;
             }
         }
         return nread;
@@ -110,10 +116,10 @@ namespace pm_tiny {
         int total_bytes = 0;
         while (!this->send_buf.empty()
                && total_bytes < this->fsbuf_size_) {
-            auto f = this->send_buf.front();
+            auto f = this->send_buf.front().get();
             if (!f->empty()) {
                 ssize_t wbytes;
-                wbytes = safe_write(this->fd_, f->data(), f->size());
+                wbytes = safe_send(this->fd_, f->data(), f->size(), MSG_NOSIGNAL);
                 if (wbytes > 0) {
                     total_bytes += (int) wbytes;
                     int remaning = (int) (f->size() - wbytes);
@@ -159,7 +165,7 @@ namespace pm_tiny {
     }
 
     int session_t::rbuf_size() const {
-        return (int) this->recv_buf.size() - 1;
+        return (int) this->recv_buf.size();
     }
 
     bool session_t::sbuf_empty() const {
@@ -177,10 +183,10 @@ namespace pm_tiny {
         } while (block && !is_close() && this->rbuf_size() < 1);
 
         if (this->rbuf_size() > 0) {
-            auto f = this->recv_buf.front();
+            auto f = std::move(this->recv_buf.front());
             recv_buf.pop_front();
 //            std::cout << "read:" << *f << std::endl;
-            uf = std::make_shared<pm_tiny::frame_t>();
+            uf = std::make_unique<pm_tiny::frame_t>();
             frame_unescape(f->begin(), f->end(), std::back_inserter(*uf));
         }
         return uf;
@@ -189,21 +195,21 @@ namespace pm_tiny {
     frame_ptr_t session_t::get_frame_from_buf() {
         pm_tiny::frame_ptr_t uf;
         if (this->rbuf_size() > 0) {
-            auto f = this->recv_buf.front();
+            auto f = std::move(this->recv_buf.front());
             recv_buf.pop_front();
-            uf = std::make_shared<pm_tiny::frame_t>();
+            uf = std::make_unique<pm_tiny::frame_t>();
             frame_unescape(f->begin(), f->end(), std::back_inserter(*uf));
         }
         return uf;
     }
 
     int session_t::write_frame(const frame_ptr_t &f, int block) {
-        auto wf = std::make_shared<pm_tiny::frame_t>();
+        auto wf = std::make_unique<pm_tiny::frame_t>();
         frame_escape(f->begin(), f->end(), std::back_inserter(*wf));
         wf->push_back(frame_delimiter);
 //        std::cout << "write:" << *wf << std::endl;
         if (!this->is_close()) {
-            this->send_buf.emplace_back(wf);
+            this->send_buf.emplace_back(std::move(wf));
             int n = 0;
             do {
                 n += this->write();
@@ -214,10 +220,24 @@ namespace pm_tiny {
         }
     }
 
+    void session_t::mark_close() {
+        mark_closed_ = true;
+    }
+
+    bool session_t::is_marked_close() const {
+        return mark_closed_;
+    }
+
+    int session_t::shutdown_read() {
+        this->mark_close();
+        return shutdown(fd_, SHUT_RD);
+    }
+
 #if PM_TINY_SERVER
 
     void session_t::set_prog(prog_info_t *prog) {
         this->prog_ = prog;
+        this->is_new_created_=true;
     }
 
     prog_info_t *session_t::get_prog() {

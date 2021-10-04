@@ -10,7 +10,6 @@ int main(int argc, char *argv[]) {
     for (;;) {
         printf("%s ===%d===\n", argv[0], i);
         i++;
-        sleep(1);
     }
     return 0;
 }

@@ -55,13 +55,14 @@ namespace pm_tiny {
 
     public:
         enum class log_level_t {
-            debug, info, error
+            debug, info, error,fatal
         };
 
         explicit logger_t(const char *logfile_path,
                           long int f_maxsize = 4 * 1024 * 1024L,
                           int out_stdout = 1, int log_file_count = 3) {
-            auto fp = open(logfile_path, O_APPEND | O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
+            auto fp = open(logfile_path, O_APPEND | O_RDWR | O_CREAT|O_CLOEXEC,
+                           S_IWUSR | S_IRUSR);
             this->out_stdout_ = out_stdout;
             this->f_path_ = logfile_path;
             this->log_file_count_ = log_file_count;
@@ -71,7 +72,7 @@ namespace pm_tiny {
         explicit logger_t(int fd = STDOUT_FILENO) noexcept {
             this->f_path_ = "";
             this->out_stdout_ = 0;
-            this->init(STDOUT_FILENO);
+            this->init(fd);
         }
 
         logger_t(const logger_t &) = delete;
@@ -123,7 +124,7 @@ namespace pm_tiny {
         }
 
         std::string log_level_to_str(log_level_t level) {
-            std::string level_str = "";
+            std::string level_str;
             switch (level) {
                 case log_level_t::debug:
                     level_str = "debug";
@@ -133,6 +134,9 @@ namespace pm_tiny {
                     break;
                 case log_level_t::error:
                     level_str = "error";
+                    break;
+                case log_level_t::fatal:
+                    level_str = "fatal";
                     break;
             }
             struct timeval tvc;
@@ -202,7 +206,8 @@ namespace pm_tiny {
                 if (remin_bytes > 0) {
                     close(this->fd_);
                     logfile_cycle_write(this->f_path_, this->log_file_count_);
-                    this->fd_ = open(this->f_path_.c_str(), O_TRUNC | O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
+                    this->fd_ = open(this->f_path_.c_str(), O_TRUNC | O_RDWR | O_CREAT | O_CLOEXEC,
+                                     S_IWUSR | S_IRUSR);
                     this->f_size_ = remin_bytes;
                     safe_write(fd_, content, remin_bytes);
 //                    printf("exceeds the maximum file size of %ld bytes,truncate\n",
@@ -254,6 +259,9 @@ namespace pm_tiny {
                 case log_level_t::error:
                     color = COLOR_RED;
                     break;
+                case log_level_t::fatal:
+                    color = COLOR_RED;
+                    break;
             }
             check_size_write_log(_log_content, len, color);
         }
@@ -288,6 +296,15 @@ namespace pm_tiny {
             va_end(p);
         }
 
+        //Fatal
+        void fatal(const char *format, ...) {
+            va_list p;
+            va_start(p, format);
+            vlog(log_level_t::fatal, format, p);
+            va_end(p);
+            exit(EXIT_FAILURE);
+        }
+
         void safe_signal_log(int sig) {
             char buf[200] = {0};
             mgr::utils::signal::signal_log(sig, buf);
@@ -304,6 +321,19 @@ namespace pm_tiny {
             va_start(p, format);
             vlog(log_level_t::error, _format.c_str(), p);
             va_end(p);
+        }
+
+        void syscall_fatal(const char *format, ...) {
+            char *error_msg = errno ? strerror(errno) : nullptr;
+            std::string _format(format);
+            if (error_msg) {
+                _format = _format + ": " + error_msg;
+            }
+            va_list p;
+            va_start(p, format);
+            vlog(log_level_t::fatal, _format.c_str(), p);
+            va_end(p);
+            exit(EXIT_FAILURE);
         }
 
         void safe_syscall_errorlog(const char *msg) {

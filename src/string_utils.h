@@ -6,6 +6,7 @@
 #include <iterator>
 #include <vector>
 #include <numeric>
+#include <tuple>
 
 namespace mgr {
 
@@ -48,14 +49,12 @@ namespace mgr {
             return s;
         }
 
-
-        std::pair<std::string, std::string> remove_ANSI_escape_code(const std::string &text);
-
+        std::tuple<std::string,std::string>splitext(const std::string&file);
 
         template<typename Out>
         void split(const std::string &s, const std::vector<char> &delims, Out result) {
             int i, prev_index = 0;
-            for (i = 0; i < s.length(); i++) {
+            for (i = 0; i < static_cast<int>(s.length()); i++) {
                 if (std::find(delims.begin(), delims.end(), s[i]) != delims.end()) {
                     if (i - prev_index > 0) {
                         *result++ = s.substr(prev_index, i - prev_index);
@@ -80,17 +79,17 @@ namespace mgr {
             return elems;
         }
 
-        inline std::string join(const std::vector<std::string> &strs, const std::string &delim = " ") {
+        inline std::string join(const std::vector<std::string> &strs, const std::string &delim=" ") {
             using namespace std::string_literals;
             return std::accumulate(strs.begin(),
-                                   strs.end(), ""s,
-                                   [&delim](const std::string &init, const std::string &v) {
-                                       if (init.empty()) {
-                                           return v;
-                                       } else {
-                                           return init + delim + v;
-                                       }
-                                   });
+                                              strs.end(), ""s,
+                                              [&delim](const std::string &init, const std::string &v) {
+                                                  if (init.empty()) {
+                                                      return v;
+                                                  }else {
+                                                      return init + delim + v;
+                                                  }
+                                              });
         }
     }
 
