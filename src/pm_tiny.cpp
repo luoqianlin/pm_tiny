@@ -86,6 +86,7 @@ namespace pm_tiny {
         int64_t min_lifetime_threshold = 100L;
         int moniter_duration_max_dead_count = -1;
         int state = PM_TINY_PROG_STATE_NO_RUN;
+        std::vector<std::string> envs;
 
         void close_pipefds() {
             std::for_each(std::begin(this->rpipefd),
@@ -197,10 +198,26 @@ struct pm_tiny_server_t {
     std::string pm_tiny_log_file;
     std::string pm_tiny_cfg_file;
     std::string pm_tiny_app_log_dir;
+    std::string pm_tiny_app_environ_dir;
     proglist_t pm_tiny_progs;
 
     int parse_cfg() {
         return parse_cfg(this->pm_tiny_progs);
+    }
+
+    void parse_app_environ(const std::string &name,
+                           std::vector<std::string> &envs) const {
+        std::fstream efs(this->pm_tiny_app_environ_dir + "/" + name);
+        if (!efs) {
+            logger->debug("%s environ not exists", name.c_str());
+            return;
+        }
+
+        for (std::string line; std::getline(efs, line);) {
+            mgr::utils::trim(line);
+            if (line.empty())continue;
+            envs.emplace_back(line);
+        }
     }
 
     int parse_cfg(proglist_t &progs) const {
@@ -230,7 +247,9 @@ struct pm_tiny_server_t {
                     logger->info("name %s already exists ignore", app_name.c_str());
                     continue;
                 }
-                auto prog_info = create_prog(app_name, elements[1], elements[2]);
+                std::vector<std::string> envs;
+                parse_app_environ(app_name, envs);
+                auto prog_info = create_prog(app_name, elements[1], elements[2], envs);
                 if (prog_info) {
                     progs.push_back(prog_info);
                 }
@@ -241,7 +260,8 @@ struct pm_tiny_server_t {
 
     prog_ptr_t create_prog(const std::string &app_name,
                            const std::string &cwd,
-                           const std::string &command) const {
+                           const std::string &command,
+                           const std::vector<std::string> &envs) const {
         const std::string &cfg_path = this->pm_tiny_cfg_file;
         const std::string &app_log_dir = this->pm_tiny_app_log_dir;
         auto prog_info = std::make_shared<pm_tiny::prog_info_t>();
@@ -262,6 +282,7 @@ struct pm_tiny_server_t {
                                    return mgr::utils::trim_copy(arg).empty();
                                }), prog_info->args.end());
         prog_info->pid = -1;
+        prog_info->envs = envs;
         if (prog_info->work_dir.empty()) {
             logger->info("%s work dir is empty ignore", app_name.c_str());
             return nullptr;
@@ -297,8 +318,9 @@ struct pm_tiny_server_t {
         const std::string &cfg_path = this->pm_tiny_cfg_file;
         const std::string &app_log_dir = this->pm_tiny_app_log_dir;
         std::stringstream ss;
+        std::vector<std::tuple<std::string, std::string>> f_envs;
         std::for_each(this->pm_tiny_progs.begin(), this->pm_tiny_progs.end(),
-                      [&ss](const prog_ptr_t &p) {
+                      [&ss, &f_envs](const prog_ptr_t &p) {
                           std::string command = std::accumulate(p->args.begin(), p->args.end(),
                                                                 std::string(""),
                                                                 [](const std::string &s1, const std::string &s2) {
@@ -306,6 +328,11 @@ struct pm_tiny_server_t {
                                                                 });
                           mgr::utils::trim(command);
                           ss << p->name << ":" << p->work_dir << ":" << command << "\n";
+                          std::stringstream env_ss;
+                          for (auto &env: p->envs) {
+                              env_ss << env << "\n";
+                          }
+                          f_envs.emplace_back(std::make_tuple(p->name, env_ss.str()));
                       });
         std::fstream cfg_file(cfg_path, std::ios::out | std::ios::trunc);
         if (!cfg_file) {
@@ -313,6 +340,15 @@ struct pm_tiny_server_t {
             return -1;
         }
         cfg_file << ss.str();
+        for (auto &env: f_envs) {
+            std::string f_name = std::get<0>(env);
+            std::string content = std::get<1>(env);
+            std::fstream env_fs(this->pm_tiny_app_environ_dir + "/" + f_name, std::ios::out | std::ios::trunc);
+            if (!env_fs) {
+                logger->debug("%s write fail", f_name.c_str());
+            }
+            env_fs << content;
+        }
         return 0;
     }
 
@@ -362,6 +398,9 @@ void check_listen_sock_has_event(int sock_fd,
                                  int &_readyfd, fd_set &rfds);
 
 pm_tiny::frame_ptr_t make_prog_info_data(proglist_t &pm_tiny_progs);
+
+std::shared_ptr<pm_tiny::frame_t>
+handle_cmd_start(pm_tiny_server_t &pm_tiny_server, pm_tiny::iframe_stream &ifs);
 
 static sig_atomic_t exit_signal = 0;
 static sig_atomic_t alarm_signal = 0;
@@ -462,7 +501,13 @@ int spawn_prog(pm_tiny::prog_info_t &prog) {
         for (int i = 0; i < prog.args.size() && i < (sizeof(args) / sizeof(args[0])); i++) {
             args[i] = (char *) prog.args[i].c_str();
         }
-        execvp(args[0], args);
+        char *envp[4096];
+        memset(&envp, 0, sizeof(envp));
+        for (int i = 0; i < prog.envs.size()
+                        && (i < ((sizeof(envp) / sizeof(envp[0])) - 1)); i++) {
+            envp[i] = (char *) prog.envs[i].data();
+        }
+        execvpe(args[0], args, envp);
         failed = errno;
         _exit(111);
     }
@@ -1043,62 +1088,8 @@ void check_sock_has_event(int total_ready_fd,
                     }
                     session->write_frame(wf);
                 } else if (f_type == 0x25) {//start
-                    //name:cwd:command
-                    std::string name;
-                    std::string cwd;
-                    std::string command;
-                    int local_resolved;
-                    ifs >> name >> cwd >> command >> local_resolved;
-//                    std::cout << "name:`" + name << "` cwd:`" << cwd << "` command:`" << command
-//                              << "` local_resolved:" << local_resolved << std::endl;
-                    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
-                                             [&name](const prog_ptr_t &prog) {
-                                                 return prog->name == name;
-                                             });
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
-                    if (iter == pm_tiny_progs.end()) {
-                        const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command);
-                        if (!prog) {
-                            pm_tiny::fappend_value<int>(*wf, 0x3);
-                            pm_tiny::fappend_value(*wf, "create `" + name + "` fail");
-                        } else {
-                            int ret = pm_tiny_server.start_and_add_prog(prog);
-                            if (ret == -1) {
-                                std::string errmsg(strerror(errno));
-                                pm_tiny::fappend_value<int>(*wf, 1);
-                                pm_tiny::fappend_value(*wf, errmsg);
-                            } else {
-                                pm_tiny::fappend_value<int>(*wf, 0);
-                                pm_tiny::fappend_value(*wf, "success");
-                            }
-                        }
-                    } else {
-                        prog_ptr_t _p = *iter;
-                        if (_p->pid == -1) {
-                            const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command);
-                            if (local_resolved && prog
-                                && (prog->work_dir != _p->work_dir || prog->args != _p->args)) {
-                                pm_tiny::fappend_value<int>(*wf, 4);
-                                pm_tiny::fappend_value(*wf, "The cwd or command has changed,"
-                                                            " please run the delete operation first");
-                            } else {
-                                int rc = pm_tiny_server_t::start_prog(_p);
-                                if (rc == -1) {
-                                    std::string errmsg(strerror(errno));
-                                    pm_tiny::fappend_value<int>(*wf, 1);
-                                    pm_tiny::fappend_value(*wf, errmsg);
-                                } else {
-                                    pm_tiny::fappend_value<int>(*wf, 0);
-                                    pm_tiny::fappend_value(*wf, "success");
-                                }
-                            }
-                        } else {
-                            pm_tiny::fappend_value<int>(*wf, 2);
-                            pm_tiny::fappend_value(*wf, "`" + name + "` already running");
-                        }
-                    }
+                    std::shared_ptr<pm_tiny::frame_t> wf = handle_cmd_start(pm_tiny_server, ifs);
                     session->write_frame(wf);
-
                 } else if (f_type == 0x26) {//save
                     auto wf = std::make_shared<pm_tiny::frame_t>();
                     int ret = pm_tiny_server.save_proc_to_cfg();
@@ -1183,6 +1174,73 @@ void check_sock_has_event(int total_ready_fd,
                                           return session->is_close();
                                       }), sessions.end());
     }
+}
+
+std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_server,
+                                                   pm_tiny::iframe_stream &ifs) {
+    proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
+    //name:cwd:command
+    std::string name;
+    std::string cwd;
+    std::string command;
+    int local_resolved;
+    int env_num;
+    ifs >> name >> cwd >> command >> local_resolved >> env_num;
+    std::vector<std::string> envs;
+    envs.resize(env_num);
+    for (int k = 0; k < env_num; k++) {
+        ifs >> envs[k];
+    }
+//   std::cout << "name:`" + name << "` cwd:`" << cwd << "` command:`" << command
+//   << "` local_resolved:" << local_resolved << std::endl;
+    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
+                             [&name](const prog_ptr_t &prog) {
+                                 return prog->name == name;
+                             });
+    auto wf = std::make_shared<pm_tiny::frame_t>();
+    if (iter == pm_tiny_progs.end()) {
+        const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs);
+        if (!prog) {
+            pm_tiny::fappend_value<int>(*wf, 0x3);
+            pm_tiny::fappend_value(*wf, "create `" + name + "` fail");
+        } else {
+            int ret = pm_tiny_server.start_and_add_prog(prog);
+            if (ret == -1) {
+                std::string errmsg(strerror(errno));
+                pm_tiny::fappend_value<int>(*wf, 1);
+                pm_tiny::fappend_value(*wf, errmsg);
+            } else {
+                pm_tiny::fappend_value<int>(*wf, 0);
+                pm_tiny::fappend_value(*wf, "success");
+            }
+        }
+    } else {
+        prog_ptr_t _p = *iter;
+        if (_p->pid == -1) {
+            const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs);
+            if (local_resolved && prog
+                && (prog->work_dir != _p->work_dir || prog->args != _p->args)) {
+                pm_tiny::fappend_value<int>(*wf, 4);
+                pm_tiny::fappend_value(*wf, "The cwd or command or environ has changed,"
+                                            " please run the delete operation first");
+            } else {
+                _p->envs = envs;
+                int rc = pm_tiny_server_t::start_prog(_p);
+                if (rc == -1) {
+                    std::string errmsg(strerror(errno));
+                    pm_tiny::fappend_value<int>(*wf, 1);
+                    pm_tiny::fappend_value(*wf, errmsg);
+                } else {
+                    pm_tiny::fappend_value<int>(*wf, 0);
+                    pm_tiny::fappend_value(*wf, "success");
+                }
+            }
+        } else {
+            pm_tiny::fappend_value<int>(*wf, 2);
+            pm_tiny::fappend_value(*wf, "`" + name + "` already running");
+        }
+    }
+    return wf;
 }
 
 pm_tiny::frame_ptr_t make_prog_info_data(proglist_t &pm_tiny_progs) {
@@ -1362,18 +1420,23 @@ int main(int argc, char *argv[]) {
     std::string pm_tiny_log_file = pm_tiny_home_dir + "/pm_tiny.log";
     std::string pm_tiny_cfg_file = cfg_path;
     std::string pm_tiny_app_log_dir = pm_tiny_home_dir + "/logs";
-    exists = pm_tiny::is_directory_exists(pm_tiny_app_log_dir.c_str());
-    if (exists == -1) {
-        perror("is_directory_exists");
-        exit(EXIT_FAILURE);
-    }
-    if (!exists) {
-        int rc = mkdir(pm_tiny_app_log_dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
-        if (rc == -1) {
-            pm_tiny::logger_stderr.syscall_errorlog("mkdir %s", pm_tiny_app_log_dir.c_str());
+    std::string pm_tiny_app_environ_dir = pm_tiny_home_dir + "/environ";
+    auto mkdir_if_need = [](const std::string &dir) {
+        int exists = pm_tiny::is_directory_exists(dir.c_str());
+        if (exists == -1) {
+            perror("is_directory_exists");
             exit(EXIT_FAILURE);
         }
-    }
+        if (!exists) {
+            int rc = mkdir(dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+            if (rc == -1) {
+                pm_tiny::logger_stderr.syscall_errorlog("mkdir %s", dir.c_str());
+                exit(EXIT_FAILURE);
+            }
+        }
+    };
+    mkdir_if_need(pm_tiny_app_log_dir);
+    mkdir_if_need(pm_tiny_app_environ_dir);
     if (pm_tiny_cfg_file.empty()) {
         pm_tiny_cfg_file = pm_tiny_home_dir + "/prog.cfg";
     }
@@ -1395,6 +1458,7 @@ int main(int argc, char *argv[]) {
     pm_tiny_server.pm_tiny_cfg_file = pm_tiny_cfg_file;
     pm_tiny_server.pm_tiny_log_file = pm_tiny_log_file;
     pm_tiny_server.pm_tiny_app_log_dir = pm_tiny_app_log_dir;
+    pm_tiny_server.pm_tiny_app_environ_dir = pm_tiny_app_environ_dir;
     start(pm_tiny_server);
     delete_lock_pid_file(lock_fp, pm_lock_file.c_str());
     return 0;

@@ -15,3 +15,5 @@ add_executable(pm_tiny src/pm_tiny.cpp
 add_executable(pm src/pm.cpp src/session.cpp
         src/pm_sys.cpp src/pm_tiny_helper.cpp
         src/frame_stream.hpp)
+
+add_executable(print_env test/print_env.cpp)

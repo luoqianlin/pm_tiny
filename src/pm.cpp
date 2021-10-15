@@ -250,7 +250,7 @@ void start_proc(pm_tiny::session_t &session,
         name = filename.substr(0, dot_idx);
         ext_name = filename.substr(dot_idx + 1);
     }
-//name:cwd:command
+//name:cwd:command local_resolved envp
     pm_tiny::frame_ptr_t f = std::make_shared<pm_tiny::frame_t>();
     f->push_back(0x25);
     if (named.empty()) {
@@ -266,6 +266,15 @@ void start_proc(pm_tiny::session_t &session,
     pm_tiny::fappend_value(*f, cwd);
     pm_tiny::fappend_value(*f, command);
     pm_tiny::fappend_value(*f, local_resolved);
+    int env_num = 0;
+    for (char **env = ::environ; *env != nullptr; env++) {
+        env_num++;
+    }
+    pm_tiny::fappend_value(*f, env_num);
+    for (char **env = ::environ; *env != nullptr; env++) {
+        char *thisEnv = *env;
+        pm_tiny::fappend_value(*f, thisEnv);
+    }
     session.write_frame(f, 1);
     auto rf = session.read_frame(1);
     if (rf) {
@@ -344,14 +353,14 @@ void show_usage(int argc, char *argv[]) {
     fprintf(stdout, "usage: %s <command> [options]\n\n", argv[0]);
     fprintf(stdout, "- Start and add a process to the pm_tiny process list:\n\n");
     fprintf(stdout, "\033[36m$ pm start \"node test.js arg0 arg1\" --name app_name\n\n\033[0m");
-    fprintf(stdout,"- Show the process list:\n\n");
-    fprintf(stdout,"\033[36m$ pm ls\n\n\033[0m");
-    fprintf(stdout,"- Stop and delete a process from the pm process list:\n\n");
-    fprintf(stdout,"\033[36m$ pm delete app_name\n\n\033[0m");
-    fprintf(stdout,"- Stop, start and restart a process from the process list:\n\n");
-    fprintf(stdout,"\033[36m$ pm stop app_name\n$ pm start app_name\n$ pm restart app_name\n\n\033[0m");
-    fprintf(stdout,"- Save the process configuration:\n\n");
-    fprintf(stdout,"\033[36m$ pm save\n\n\033[0m");
+    fprintf(stdout, "- Show the process list:\n\n");
+    fprintf(stdout, "\033[36m$ pm ls\n\n\033[0m");
+    fprintf(stdout, "- Stop and delete a process from the pm process list:\n\n");
+    fprintf(stdout, "\033[36m$ pm delete app_name\n\n\033[0m");
+    fprintf(stdout, "- Stop, start and restart a process from the process list:\n\n");
+    fprintf(stdout, "\033[36m$ pm stop app_name\n$ pm start app_name\n$ pm restart app_name\n\n\033[0m");
+    fprintf(stdout, "- Save the process configuration:\n\n");
+    fprintf(stdout, "\033[36m$ pm save\n\n\033[0m");
 }
 
 struct cmd_opt_t {
@@ -463,7 +472,7 @@ int main(int argc, char *argv[]) {
     }
     if (!found_command) {
         fprintf(stderr, "\033[31mCommand not found:%s\n\n\033[0m", argv[1]);
-        show_usage(argc,argv);
+        show_usage(argc, argv);
         exit(EXIT_FAILURE);
     }
     if (cmd_opt == nullptr) {
