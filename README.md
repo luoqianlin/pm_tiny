@@ -23,7 +23,7 @@ $ make
 已安装相应的SDK,交叉编译工具链应该位于目录`/opt/hisi-linux/x86-arm`
 ```shell
 $ mkdir hisi_build && cd hisi_build
-$ cmake -DCMAKE_TOOLCHAIN_FILE=toolchains/himix100.toolchain.cmake ..
+$ cmake -DCMAKE_TOOLCHAIN_FILE=../toolchains/himix100.toolchain.cmake ..
 $ make
 ```
 ### 使用
