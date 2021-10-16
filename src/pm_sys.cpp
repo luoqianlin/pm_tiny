@@ -10,7 +10,9 @@
 #include <sys/fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
-
+#include "log.h"
+#include "time_util.h"
+#include "globals.h"
 
 namespace pm_tiny {
     ssize_t safe_read(int fd, void *buf, size_t nbytes) {
@@ -73,13 +75,117 @@ namespace pm_tiny {
         request.tv_sec = second;
         memset(&remain, 0, sizeof(remain));
         do {
+            errno = 0;
             rc = clock_nanosleep(CLOCK_MONOTONIC, 0, &request, &remain);
-            if (rc != 0 && errno == EINTR) {
+            if (rc == EINTR) {
                 memcpy(&request, &remain, sizeof(remain));
             } else {
                 break;
             }
         } while (true);
         return rc;
+    }
+
+    int sleep_waitfor_0(int check_interval_ms, const std::function<bool()> &predicate) {
+        struct timespec request, remain;
+        int rc;
+        request.tv_nsec = check_interval_ms * 1000000;
+        request.tv_sec = 0;
+        memset(&remain, 0, sizeof(remain));
+        bool pred = true;
+        do {
+            errno = 0;
+            rc = clock_nanosleep(CLOCK_MONOTONIC, 0, &request, &remain);
+            pred = predicate();
+            if (rc == EINTR && !pred) {
+                memcpy(&request, &remain, sizeof(remain));
+            } else {
+                break;
+            }
+        } while (true);
+        return pred;
+    }
+
+    void sleep_waitfor(int check_interval_ms, int check_count,
+                       const std::function<bool()> &predicate) {
+        for (int i = 0; i < check_count; i++) {
+            bool finish = sleep_waitfor_0(check_interval_ms, predicate);
+            if (finish) {
+                break;
+            }
+        }
+    }
+
+    void sleep_waitfor(int second, const std::function<bool()> &predicate, int interval_ms) {
+        sleep_waitfor(interval_ms, second * 1000 / interval_ms, predicate);
+    }
+
+    int is_process_exists(int pid) {
+        int rc = kill(pid, 0);
+        if (rc == -1) {
+            if (errno == ESRCH) {
+                errno = 0;
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    int safe_kill_process(int pid, int tolerance_time) {
+        int rc = kill(pid, SIGTERM);
+        if (rc == -1) {
+            PM_TINY_LOG_E_SYS("kill pid:%d", pid);
+            return -1;
+        }
+        time::CElapsedTimer elapsedTimer;
+        pm_tiny::sleep_waitfor(tolerance_time, [&pid]() {
+            return !pm_tiny::is_process_exists(pid);
+        });
+        if (pm_tiny::is_process_exists(pid)) {
+            PM_TINY_LOG_I("pid:%d still exists,force kill", pid);
+            rc = kill(pid, SIGKILL);
+            if (rc == -1) {
+                PM_TINY_LOG_E_SYS("force kill pid:%d", pid);
+            }
+        }
+        auto kill_cost = elapsedTimer.sec();
+        if (kill_cost > 1) {
+            PM_TINY_LOG_I("kill pid:%d cost:%us", pid, kill_cost);
+        }
+        return 0;
+    }
+
+    // Read VmRSS from /proc/[pid]/statm and convert to kiB.
+    // Returns the value (>= 0) or -errno on error.
+    long long get_vm_rss_kib(int pid) {
+
+        long long vm_rss_kib = -1;
+        char path[256] = {0};
+
+        // Read VmRSS from /proc/[pid]/statm (in pages)
+        snprintf(path, sizeof(path), "%s/%d/statm", procdir_path, pid);
+        FILE *f = fopen(path, "r");
+        if (f == NULL) {
+            return -errno;
+        }
+        int matches = fscanf(f, "%*u %lld", &vm_rss_kib);
+        fclose(f);
+        if (matches < 1) {
+            return -ENODATA;
+        }
+
+        // Read and cache page size
+        static long page_size;
+        if (page_size == 0) {
+            page_size = sysconf(_SC_PAGESIZE);
+            if (page_size <= 0) {
+                PM_TINY_LOG_E_SYS("could not read page size");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        // Convert to kiB
+        vm_rss_kib = vm_rss_kib * page_size / 1024;
+        return vm_rss_kib;
     }
 }

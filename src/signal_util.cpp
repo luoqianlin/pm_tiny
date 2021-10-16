@@ -104,6 +104,29 @@ break
                 strcat(buf, " rev signal:");
                 signo_to_str(sig, buf, true);
             }
+
+            int  sigprocmask_allsigs(int how,sigset_t *oset)
+            {
+                sigset_t set;
+                sigfillset(&set);
+                return sigprocmask(how, &set, oset);
+            }
+
+            void bb_signals(int sigs, void (*f)(int))
+            {
+                int sig_no = 0;
+                int bit = 1;
+
+                while (sigs) {
+                    if (sigs & bit) {
+                        sigs -= bit;
+                        ::signal(sig_no, f);
+                    }
+                    sig_no++;
+                    bit <<= 1;
+                }
+            }
+
         }
     }
 }

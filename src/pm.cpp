@@ -29,6 +29,7 @@
 #include "pm_tiny.h"
 #include "frame_stream.hpp"
 #include "string_utils.h"
+#include "memory_util.h"
 
 using pm_tiny::operator<<;
 
@@ -39,6 +40,7 @@ struct proc_info_t {
     std::string command;
     int restart_count;
     int state;
+    long long vm_rss_kib;
 };
 
 std::ostream &operator<<(std::ostream &os, proc_info_t const &p) {
@@ -81,7 +83,7 @@ void display_proc_infos(pm_tiny::session_t &session) {
         int num;
         ifs >> num;
         proc_infos.resize(num);
-        //n pid:name:workdir:command:restart_count:state
+        //n pid:name:workdir:command:restart_count:state:vm_rss_kib
         for (int i = 0; i < num; i++) {
             ifs >> proc_infos[i].pid;
             ifs >> proc_infos[i].name;
@@ -89,10 +91,11 @@ void display_proc_infos(pm_tiny::session_t &session) {
             ifs >> proc_infos[i].command;
             ifs >> proc_infos[i].restart_count;
             ifs >> proc_infos[i].state;
+            ifs>>proc_infos[i].vm_rss_kib;
         }
-        const int COLUMN_NUM = 6;
+        const int COLUMN_NUM = 7;
         int column_widths[COLUMN_NUM];
-        std::string heads[COLUMN_NUM] = {"pid", "name", "cwd", "command", "restart", "state"};
+        std::string heads[COLUMN_NUM] = {"pid", "name", "cwd", "command", "restart", "state","memory"};
         printf("Total:%ld\n", proc_infos.size());
         for (int i = 0; i < COLUMN_NUM; i++) {
             column_widths[i] = (int) heads[i].length();
@@ -119,6 +122,10 @@ void display_proc_infos(pm_tiny::session_t &session) {
             std::string s_state = pm_state_to_str(proc_infos[i].state);
             if (s_state.length() > column_widths[5]) {
                 column_widths[5] = (int) s_state.length();
+            }
+            std::string mem_size = pm_tiny::utils::memory::to_human_readable_size(proc_infos[i].vm_rss_kib);
+            if (mem_size.length() > column_widths[6]) {
+                column_widths[6] = (int) mem_size.length();
             }
         }
         const int TTY_WIDTH = 132;
@@ -179,12 +186,13 @@ void display_proc_infos(pm_tiny::session_t &session) {
             } else {
                 s_state = "\033[1;31m" + s_state + "\033[0m";
             }
-            printf("| %-*d | %-*s | %-*s | %-*s | %-*d | %-*s |\n", column_widths[0], p.pid,
+            std::string mem_size_str = pm_tiny::utils::memory::to_human_readable_size(proc_infos[i].vm_rss_kib);
+            printf("| %-*d | %-*s | %-*s | %-*s | %-*d | %-*s | %-*s |\n", column_widths[0], p.pid,
                    column_widths[1], truncate_long_str(p.name, column_widths[1]).c_str(),
                    column_widths[2], truncate_long_str(p.work_dir, column_widths[2]).c_str(),
                    column_widths[3], truncate_long_str(p.command, column_widths[3]).c_str(),
                    column_widths[4], p.restart_count,
-                   column_widths[5] + 11, s_state.c_str()
+                   column_widths[5] + 11, s_state.c_str(),column_widths[6],mem_size_str.c_str()
             );
         }
         if (!proc_infos.empty()) {
@@ -215,7 +223,7 @@ void stop_proc(pm_tiny::session_t &session, const std::string &app_name) {
 
 void start_proc(pm_tiny::session_t &session,
                 const std::string &cmd,
-                const std::string &named) {
+                const std::string &named,int kill_timeout) {
     std::vector<std::string> args;
     mgr::utils::split(cmd, {' ', '\t'}, std::back_inserter(args));
     std::for_each(args.begin(), args.end(), mgr::utils::trim);
@@ -275,6 +283,7 @@ void start_proc(pm_tiny::session_t &session,
         char *thisEnv = *env;
         pm_tiny::fappend_value(*f, thisEnv);
     }
+    pm_tiny::fappend_value(*f,kill_timeout);
     session.write_frame(f, 1);
     auto rf = session.read_frame(1);
     if (rf) {
@@ -349,10 +358,23 @@ void restart_prog(pm_tiny::session_t &session, const std::string &app_name) {
     }
 }
 
+void show_version(pm_tiny::session_t&session){
+    pm_tiny::frame_ptr_t f = std::make_shared<pm_tiny::frame_t>();
+    f->push_back(0x29);
+    session.write_frame(f, 1);
+    auto rf = session.read_frame(1);
+
+    if (rf) {
+        pm_tiny::iframe_stream ifs(*rf);
+        std::string version;
+        ifs >> version;
+        fprintf(stdout, "%s\n", version.c_str());
+    }
+}
 void show_usage(int argc, char *argv[]) {
     fprintf(stdout, "usage: %s <command> [options]\n\n", argv[0]);
     fprintf(stdout, "- Start and add a process to the pm_tiny process list:\n\n");
-    fprintf(stdout, "\033[36m$ pm start \"node test.js arg0 arg1\" --name app_name\n\n\033[0m");
+    fprintf(stdout, "\033[36m$ pm start \"node test.js arg0 arg1\" --name app_name [--kill_timeout second] \n\n\033[0m");
     fprintf(stdout, "- Show the process list:\n\n");
     fprintf(stdout, "\033[36m$ pm ls\n\n\033[0m");
     fprintf(stdout, "- Stop and delete a process from the pm process list:\n\n");
@@ -407,10 +429,13 @@ int main(int argc, char *argv[]) {
     };
     auto start_fun = [](cmd_opt_t &cmd_opt) -> void * {
         std::string named;
+        std::string kill_timeout_str = "3";
+        int kill_timeout=3;
         int option_index = 0;
         optind = 2;
         static struct option long_options[] = {
                 {"name", required_argument, 0, 0},
+                {"kill_timeout", required_argument, 0, 0},
                 {nullptr, 0,                0, 0}
         };
         int c;
@@ -422,7 +447,11 @@ int main(int argc, char *argv[]) {
             switch (c) {
                 case 0:
                     if (optarg) {
-                        named = optarg;
+                        if (option_index == 0) {
+                            named = optarg;
+                        } else {
+                            kill_timeout_str = optarg;
+                        }
                     }
                     break;
 
@@ -431,8 +460,60 @@ int main(int argc, char *argv[]) {
                     exit(EXIT_FAILURE);
             }
         }
-        start_proc(*cmd_opt.session, cmd_opt.argv[1], named);
+        try {
+            kill_timeout = std::stoi(kill_timeout_str);
+        } catch (const std::invalid_argument &e) {
+            kill_timeout = 3;
+        }
+        start_proc(*cmd_opt.session, cmd_opt.argv[1], named,kill_timeout);
         return nullptr;
+    };
+    auto version_fun = [](cmd_opt_t &cmd_opt) -> void * {
+        show_version(*cmd_opt.session);
+        return nullptr;
+    };
+
+    auto handle_cmdline = [&make_cmd_opt,
+            &version_fun](int argc, char *argv[])
+            -> cmd_opt_t {
+        int c;
+        int digit_optind = 0;
+        bool found = false;
+        while (true) {
+            int this_option_optind = optind ? optind : 1;
+            int option_index = 0;
+            static struct option long_options[] = {
+                    {"version", no_argument, 0, 0},
+                    {0, 0,                   0, 0}
+            };
+
+            c = getopt_long(argc, argv, "vV",
+                            long_options, &option_index);
+            if (c == -1)
+                break;
+
+            switch (c) {
+                case 0:
+//                  printf("option %s", long_options[option_index].name);
+                    found = true;
+                    break;
+                case 'v':
+                case 'V':
+                    found = true;
+                    break;
+                case '?':
+                    break;
+
+                default:
+                    printf("?? getopt returned character code 0%o ??\n", c);
+            }
+        }
+        if (found) {
+            return make_cmd_opt("show_version", version_fun, 0);
+        } else {
+            show_usage(argc, argv);
+            exit(EXIT_FAILURE);
+        }
     };
     auto save_fun = [](cmd_opt_t &cmd_opt) -> void * {
         save_proc(*cmd_opt.session);
@@ -470,6 +551,12 @@ int main(int argc, char *argv[]) {
             break;
         }
     }
+    if (!found_command && argv[1][0] == '-') {
+        static auto opt = handle_cmdline(argc, argv);
+        cmd_opt = &opt;
+        found_command = true;
+    }
+
     if (!found_command) {
         fprintf(stderr, "\033[31mCommand not found:%s\n\n\033[0m", argv[1]);
         show_usage(argc, argv);

@@ -11,15 +11,39 @@
 #include "../src/time_util.h"
 #include "../src/signal_util.h"
 #include "pm_sys.h"
+#include <string.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 
 namespace pm_tiny {
+
     class logger_t {
     private:
+        const char *COLOR_RED = "\033[31m";
+        const char *COLOR_YELLOW = "\033[33m";
+        const char *COLOR_GRAY = "\033[2m";
+        const char *COLOR_WHITE = "\033[0m";
+        const char *COLOR_WHITE_HIGHLIGHT = "\033[1m";
+        const char *COLOR_GREEN = "\033[32m";
+
+        int no_color = 0;
+        bool is_tty = false;
+
         void init(int fp, long int f_maxsize = 4 * 1024 * 1024L) {
+
+            // https://no-color.org/
+            if (getenv("NO_COLOR") != nullptr) {
+                no_color = 1;
+            } else {
+                no_color = 0;
+            }
+
             this->fd_ = fp;
             this->f_maxsize_ = f_maxsize;
-            if (!isatty(fp)) {
+            this->is_tty = isatty(fp);
+            if (!is_tty) {
                 struct stat st;
                 int rc = fstat(fp, &st);
                 if (rc == -1) {
@@ -44,7 +68,7 @@ namespace pm_tiny {
             this->init(fp, f_maxsize);
         }
 
-        logger_t(int fd = STDOUT_FILENO) {
+        explicit logger_t(int fd = STDOUT_FILENO) noexcept {
             this->f_path_ = "";
             this->out_stdout_ = 0;
             this->init(STDOUT_FILENO);
@@ -116,7 +140,7 @@ namespace pm_tiny {
             char buf[sizeof("yyyy-mm-dd hh:mm:ss") + /*paranoia:*/ 4];
             gettimeofday(&tvc, nullptr);/* never fails */
             tval = tvc.tv_sec;
-            strftime_YYYYMMDDHHMMSS(buf, sizeof(buf), &tval);
+            pm_tiny::time::strftime_YYYYMMDDHHMMSS(buf, sizeof(buf), &tval);
             char buf2[sizeof(buf) * 2];
             sprintf(buf2, "%s.%06u [%5s] ", buf, (unsigned) tvc.tv_usec, level_str.c_str());
             return buf2;
@@ -124,7 +148,7 @@ namespace pm_tiny {
         }
 
         /*
-         *  An async-signal-safe function
+         *
          * */
         static void logfile_cycle_write(const std::string &f_path, int log_file_count,
                                         std::string logfileext = ".log") {
@@ -163,21 +187,45 @@ namespace pm_tiny {
             }
         }
 
-        void check_size_write_log(const char *content, int len) {
+        void check_rotate_log_file(const char *content, int len) {
             if (f_size_ != -1 && f_maxsize_ > 0) {
-                f_size_ += len;
-                if (f_size_ > f_maxsize_) {
+                int remin_bytes = len;
+                if (f_size_ < f_maxsize_) {
+                    int write_bytes = std::min(static_cast<int>(f_maxsize_ - f_size_), len);
+                    remin_bytes = len - write_bytes;
+                    if (write_bytes > 0) {
+                        safe_write(fd_, content, write_bytes);
+                        content += write_bytes;
+                        f_size_ += write_bytes;
+                    }
+                }
+                if (remin_bytes > 0) {
                     close(this->fd_);
                     logfile_cycle_write(this->f_path_, this->log_file_count_);
                     this->fd_ = open(this->f_path_.c_str(), O_TRUNC | O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
-                    f_size_ = len;
+                    this->f_size_ = remin_bytes;
+                    safe_write(fd_, content, remin_bytes);
 //                    printf("exceeds the maximum file size of %ld bytes,truncate\n",
 //                           f_maxsize_);
                 }
             }
-            safe_write(fd_, content, len);
-            if (this->out_stdout_) {
-                safe_write(STDOUT_FILENO, content, len);
+        }
+
+        static void write_log_with_color(int fd, const char *content, int len, const char *color) {
+            const char *reset = "\033[0m";
+            safe_write(fd, color, strlen(color));
+            safe_write(fd, content, len);
+            safe_write(fd, reset, strlen(reset));
+        }
+
+        void check_size_write_log(const char *content, int len, const char *color) {
+            if (!is_tty) {
+                check_rotate_log_file(content, len);
+                if (this->out_stdout_) {
+                    write_log_with_color(STDOUT_FILENO, content, len, color);
+                }
+            } else {
+                write_log_with_color(this->fd_, content, len, color);
             }
         }
 
@@ -194,7 +242,20 @@ namespace pm_tiny {
             }
             int len = (int) log_content.length();
             const char *_log_content = log_content.c_str();
-            check_size_write_log(_log_content, len);
+
+            const char *color = COLOR_GRAY;
+            switch (log_level) {
+                case log_level_t::debug:
+                    color = COLOR_GRAY;
+                    break;
+                case log_level_t::info:
+                    color = COLOR_WHITE;
+                    break;
+                case log_level_t::error:
+                    color = COLOR_RED;
+                    break;
+            }
+            check_size_write_log(_log_content, len, color);
         }
 
 
@@ -230,7 +291,7 @@ namespace pm_tiny {
         void safe_signal_log(int sig) {
             char buf[200] = {0};
             mgr::utils::signal::signal_log(sig, buf);
-            check_size_write_log(buf, strlen(buf));
+            check_size_write_log(buf, strlen(buf),COLOR_WHITE_HIGHLIGHT);
         }
 
         void syscall_errorlog(const char *format, ...) {
@@ -265,7 +326,7 @@ namespace pm_tiny {
                 buf[buf_max_len - 2] = '\n';
                 buf[buf_max_len - 1] = 0;
             }
-            check_size_write_log(buf, strlen(buf));
+            check_size_write_log(buf, strlen(buf),COLOR_RED);
         }
 
 

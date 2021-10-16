@@ -108,5 +108,14 @@ $ pm save
 Success
 ```
 
-应用程序的输出日志默认在`~/.pm_tiny/logs`目录下
+### 配置
+
+pm_tiny默认家目录(PM_TINY_HOME)为`~/.pm_tiny`,也可以通过修改环境变量`PM_TINY_HOME`指定家目录。
+
+应用程序的输出日志默认在`${PM_TINY_HOME}/logs`目录下
+
+### 应用重启策略
+
+pm_tiny只有当应用程序退出值为非0时才重启应用
+
 

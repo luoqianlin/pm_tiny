@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <iterator>
 #include <vector>
+#include <numeric>
 
 namespace mgr {
 
@@ -74,6 +75,19 @@ namespace mgr {
             std::vector<std::string> elems;
             split(s, delims, std::back_inserter(elems));
             return elems;
+        }
+
+        inline std::string join(const std::vector<std::string> &strs, const std::string &delim=" ") {
+            using namespace std::string_literals;
+            return std::accumulate(strs.begin(),
+                                              strs.end(), ""s,
+                                              [&delim](const std::string &init, const std::string &v) {
+                                                  if (init.empty()) {
+                                                      return v;
+                                                  }else {
+                                                      return init + delim + v;
+                                                  }
+                                              });
         }
     }
 

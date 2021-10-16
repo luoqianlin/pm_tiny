@@ -3,36 +3,37 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
+#include <inttypes.h>
+#include <chrono>
 
+namespace pm_tiny {
+    namespace time {
+        class CElapsedTimer final
+        {
+        public:
+            CElapsedTimer(void);
+            ~CElapsedTimer(void);
 
-inline unsigned long long current_millisecond() {
+            void reset(void);
+            uint32_t hh(void)const;
+            uint32_t mm(void)const;
+            uint32_t sec(void)const;
+            uint32_t ms(void)const;
+            uint64_t us(void)const;
+            uint64_t ns(void)const;
 
-    struct timespec start;
-    int ret = clock_gettime(CLOCK_MONOTONIC, &start);
-    if (ret != 0) {
-        perror("clock_gettime");
+        private:
+            std::chrono::steady_clock::time_point m_begin;
+        };
+        int64_t gettime_monotonic_ms();
+
+        char *strftime_fmt(char *buf, unsigned len, time_t *tp, const char *fmt);
+
+        char *strftime_HHMMSS(char *buf, unsigned len, time_t *tp);
+
+        char *strftime_YYYYMMDDHHMMSS(char *buf, unsigned len, time_t *tp);
     }
-    unsigned long long _start = (start.tv_nsec + start.tv_sec * 1e9) / 1e6;
-    return _start;
-}
-
-
-inline char *strftime_fmt(char *buf, unsigned len, time_t *tp, const char *fmt) {
-    time_t t;
-    if (!tp) {
-        tp = &t;
-        time(tp);
-    }
-    /* Returns pointer to NUL */
-    return buf + strftime(buf, len, fmt, localtime(tp));
-}
-
-inline char *strftime_HHMMSS(char *buf, unsigned len, time_t *tp) {
-    return strftime_fmt(buf, len, tp, "%H:%M:%S");
-}
-
-inline char *strftime_YYYYMMDDHHMMSS(char *buf, unsigned len, time_t *tp) {
-    return strftime_fmt(buf, len, tp, "%Y-%m-%d %H:%M:%S");
 }
 
 #endif
