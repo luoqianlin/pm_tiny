@@ -210,6 +210,9 @@ struct pm_tiny_server_t {
         std::fstream efs(this->pm_tiny_app_environ_dir + "/" + name);
         if (!efs) {
             logger->debug("%s environ not exists", name.c_str());
+            for (char **env = environ; *env != nullptr; env++) {
+                envs.emplace_back(*env);
+            }
             return;
         }
 
