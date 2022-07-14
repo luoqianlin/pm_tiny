@@ -223,7 +223,7 @@ void stop_proc(pm_tiny::session_t &session, const std::string &app_name) {
 
 void start_proc(pm_tiny::session_t &session,
                 const std::string &cmd,
-                const std::string &named,int kill_timeout) {
+                const std::string &named,int kill_timeout,const std::string&run_as) {
     std::vector<std::string> args;
     mgr::utils::split(cmd, {' ', '\t'}, std::back_inserter(args));
     std::for_each(args.begin(), args.end(), mgr::utils::trim);
@@ -284,6 +284,7 @@ void start_proc(pm_tiny::session_t &session,
         pm_tiny::fappend_value(*f, thisEnv);
     }
     pm_tiny::fappend_value(*f,kill_timeout);
+    pm_tiny::fappend_value(*f,run_as);
     session.write_frame(f, 1);
     auto rf = session.read_frame(1);
     if (rf) {
@@ -430,12 +431,14 @@ int main(int argc, char *argv[]) {
     auto start_fun = [](cmd_opt_t &cmd_opt) -> void * {
         std::string named;
         std::string kill_timeout_str = "3";
+        std::string run_as;
         int kill_timeout=3;
         int option_index = 0;
         optind = 2;
         static struct option long_options[] = {
                 {"name", required_argument, 0, 0},
                 {"kill_timeout", required_argument, 0, 0},
+                {"run_as", required_argument, 0, 0},
                 {nullptr, 0,                0, 0}
         };
         int c;
@@ -449,8 +452,10 @@ int main(int argc, char *argv[]) {
                     if (optarg) {
                         if (option_index == 0) {
                             named = optarg;
-                        } else {
+                        } else if (option_index == 1) {
                             kill_timeout_str = optarg;
+                        } else {
+                            run_as = optarg;
                         }
                     }
                     break;
@@ -465,7 +470,7 @@ int main(int argc, char *argv[]) {
         } catch (const std::invalid_argument &e) {
             kill_timeout = 3;
         }
-        start_proc(*cmd_opt.session, cmd_opt.argv[1], named,kill_timeout);
+        start_proc(*cmd_opt.session, cmd_opt.argv[1], named,kill_timeout,run_as);
         return nullptr;
     };
     auto version_fun = [](cmd_opt_t &cmd_opt) -> void * {

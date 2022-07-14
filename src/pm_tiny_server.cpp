@@ -77,15 +77,19 @@ namespace pm_tiny {
                 std::vector <std::string> envs;
                 parse_app_environ(app_name, envs);
                 int kill_timeout_s=3;
+                std::string run_as;
                 if (elements.size() > 3) {
                     try {
                         kill_timeout_s = std::stoi(elements[3]);
                     } catch (const std::exception &ex) {
                         //ignore
                     }
+                    if (elements.size() > 4) {
+                        run_as = elements[4];
+                    }
                 }
                 auto prog_info = create_prog(app_name, elements[1], elements[2],
-                                             envs,kill_timeout_s);
+                                             envs,kill_timeout_s,run_as);
                 if (prog_info) {
                     progs.push_back(prog_info);
                 }
@@ -98,7 +102,7 @@ namespace pm_tiny {
                            const std::string &cwd,
                            const std::string &command,
                            const std::vector <std::string> &envs,
-                           int kill_timeout_sec) const {
+                           int kill_timeout_sec,const std::string&run_as) const {
         const std::string &cfg_path = this->pm_tiny_cfg_file;
         const std::string &app_log_dir = this->pm_tiny_app_log_dir;
         auto prog_info = std::make_shared<pm_tiny::prog_info_t>();
@@ -132,6 +136,7 @@ namespace pm_tiny {
             kill_timeout_sec = 3;
         }
         prog_info->kill_timeout_sec = kill_timeout_sec;
+        prog_info->run_as=run_as;
         return prog_info;
     }
 
@@ -167,7 +172,8 @@ namespace pm_tiny {
                                                                     return s1 + (s2 + " ");
                                                                 });
                           mgr::utils::trim(command);
-                          ss << p->name << ":" << p->work_dir << ":" << command <<":"<<p->kill_timeout_sec<< "\n";
+                          ss << p->name << ":" << p->work_dir << ":" << command
+                             << ":" << p->kill_timeout_sec << ":" << p->run_as << "\n";
                           std::stringstream env_ss;
                           for (auto &env: p->envs) {
                               env_ss << env << "\n";
@@ -287,6 +293,19 @@ namespace pm_tiny {
 //            if (rc == -1) {
 //                logger->syscall_errorlog("sigaction SIGPIPE");
 //            }
+            if (!prog.run_as.empty()) {
+                passwd_t passwd;
+                rc = get_uid_from_username(prog.run_as.c_str(), passwd);
+                if (rc == -1) {
+                    failed = errno;
+                    _exit(112);
+                }
+                rc = setreuid(passwd.pw_uid, passwd.pw_uid);
+                if (rc == -1) {
+                    failed = errno;
+                    _exit(112);
+                }
+            }
             if (!prog.work_dir.empty()) {
                 rc = chdir(prog.work_dir.c_str());
                 if (rc == -1) {

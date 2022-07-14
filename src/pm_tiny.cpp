@@ -700,6 +700,7 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
     int local_resolved;
     int env_num;
     int kill_timeout;
+    std::string run_as;
     ifs >> name >> cwd >> command >> local_resolved >> env_num;
     std::vector<std::string> envs;
     envs.resize(env_num);
@@ -707,15 +708,17 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
         ifs >> envs[k];
     }
     ifs >> kill_timeout;
+    ifs >> run_as;
 //   std::cout << "name:`" + name << "` cwd:`" << cwd << "` command:`" << command
 //   << "` local_resolved:" << local_resolved << std::endl;
+//    PM_TINY_LOG_D("run_as:%s",run_as.c_str());
     auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
                              [&name](const prog_ptr_t &prog) {
                                  return prog->name == name;
                              });
     auto wf = std::make_shared<pm_tiny::frame_t>();
     if (iter == pm_tiny_progs.end()) {
-        const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout);
+        const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
         if (!prog) {
             pm_tiny::fappend_value<int>(*wf, 0x3);
             pm_tiny::fappend_value(*wf, "create `" + name + "` fail");
@@ -733,7 +736,7 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
     } else {
         prog_ptr_t _p = *iter;
         if (_p->pid == -1) {
-            const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout);
+            const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
             if (local_resolved && prog
                 && (prog->work_dir != _p->work_dir || prog->args != _p->args)) {
                 pm_tiny::fappend_value<int>(*wf, 4);

@@ -70,7 +70,8 @@ namespace pm_tiny {
                                const std::string &cwd,
                                const std::string &command,
                                const std::vector<std::string> &envs,
-                               int kill_timeout_sec) const;
+                               int kill_timeout_sec,
+                               const std::string&run_as) const;
 
         int start_and_add_prog(const prog_ptr_t &prog);
 

@@ -66,6 +66,7 @@ namespace pm_tiny {
         int state = PM_TINY_PROG_STATE_NO_RUN;
         std::vector <std::string> envs;
         int kill_timeout_sec = 3;//3s
+        std::string run_as;
 
         void close_pipefds();
 

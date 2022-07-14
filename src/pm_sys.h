@@ -10,6 +10,15 @@
 #include <functional>
 
 namespace pm_tiny {
+    struct passwd_t {
+        std::string pw_name;        /* Username.  */
+        std::string pw_passwd;        /* Password.  */
+        uid_t pw_uid;        /* User ID.  */
+        gid_t pw_gid;        /* Group ID.  */
+        std::string pw_gecos;        /* Real name.  */
+        std::string pw_dir;            /* Home directory.  */
+        std::string pw_shell;        /* Shell program.  */
+    };
 
     ssize_t safe_read(int fd, void *buf, size_t nbytes);
 
@@ -25,9 +34,10 @@ namespace pm_tiny {
 
     int safe_sleep(int second);
 
-    void sleep_waitfor(int check_interval_ms,int check_count,
-                             const std::function<bool()>& predicate);
-    void sleep_waitfor(int second,const std::function<bool()>& predicate,int interval_ms=20);
+    void sleep_waitfor(int check_interval_ms, int check_count,
+                       const std::function<bool()> &predicate);
+
+    void sleep_waitfor(int second, const std::function<bool()> &predicate, int interval_ms = 20);
 
     int is_process_exists(int pid);
 
@@ -36,6 +46,8 @@ namespace pm_tiny {
     // Read VmRSS from /proc/[pid]/statm and convert to kiB.
     // Returns the value (>= 0) or -errno on error.
     long long get_vm_rss_kib(int pid);
+
+    int get_uid_from_username(const char *name, passwd_t &passwd);
 }
 
 #endif //PM_TINY_PM_SYS_H
