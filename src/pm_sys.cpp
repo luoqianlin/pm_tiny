@@ -12,6 +12,7 @@
 #include <time.h>
 #include <pwd.h>
 #include <stdlib.h>
+#include <memory>
 
 #include "log.h"
 #include "time_util.h"
@@ -194,16 +195,15 @@ namespace pm_tiny {
     int get_uid_from_username(const char*name,passwd_t&passwd_){
         struct passwd pwd;
         struct passwd *result;
-        char *buf;
         size_t bufsize;
         int s;
         bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
         if (bufsize == -1) {          /* Value was indeterminate */
             bufsize = 16384;        /* Should be more than enough */
         }
-        buf = new char[bufsize];
+        std::unique_ptr<char[]> buf(new char[bufsize]);
         errno = 0;
-        s = getpwnam_r(name, &pwd, buf, bufsize, &result);
+        s = getpwnam_r(name, &pwd, buf.get(), bufsize, &result);
         if (result == nullptr) {
             if (s == 0) {
                 errno = 0;
