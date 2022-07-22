@@ -1,6 +1,7 @@
 #include "pm_tiny_server.h"
 #include "log.h"
 #include "time_util.h"
+#include "prog.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
@@ -26,6 +27,8 @@ pm_tiny::frame_ptr_t make_prog_info_data(proglist_t &pm_tiny_progs);
 
 std::shared_ptr<pm_tiny::frame_t>
 handle_cmd_start(pm_tiny_server_t &pm_tiny_server, pm_tiny::iframe_stream &ifs);
+
+void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions);
 
 static sig_atomic_t exit_signal = 0;
 static sig_atomic_t alarm_signal = 0;
@@ -254,27 +257,7 @@ static void check_delayed_hup_sig(pm_tiny_server_t &tiny_server) {
     }
 }
 
-void log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus) {
-    const char *prog_name = "Unkown";
-    float run_time = NAN;
-    int restart_count = 0;
-    if (prog) {
-        prog_name = (char *) prog->name.c_str();
-        run_time = (float) (pm_tiny::time::gettime_monotonic_ms() - prog->last_startup_ms) / (60 * 1000.0f);
-        restart_count = prog->dead_count;
-    }
-    if (WIFEXITED(wstatus)) {
-        int exit_code = WEXITSTATUS(wstatus);
-        pm_tiny::logger->info("pid:%d name:%s exited, exit code %d run time:%.3f minutes restart:%d\n",
-                     pid, prog_name, exit_code, run_time, restart_count);
-    } else if (WIFSIGNALED(wstatus)) {
-        int kill_signo = WTERMSIG(wstatus);
-        char buf[80] = {0};
-        mgr::utils::signal::signo_to_str(kill_signo, buf, false);
-        pm_tiny::logger->info("pid:%d name:%s killed by signal %s run time:%.3f minutes restart:%d\n",
-                     pid, prog_name, buf, run_time, restart_count);
-    }
-}
+
 
 /*
  * 检查是否有子进程退出，如果有则回收子进程空间(waitpid)
@@ -294,7 +277,8 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
 
                 if (iter != pm_tiny_progs.end()) {
                     auto p = *iter;
-                    log_proc_exit_status(&(*p), rc, wstatus);
+                    std::string exit_info=pm_tiny::prog_info_t::log_proc_exit_status(&(*p), rc, wstatus);
+                    pm_tiny::logger->info(exit_info.c_str());
                     auto now_ms = pm_tiny::time::gettime_monotonic_ms();
                     auto life_time = now_ms - p->last_startup_ms;
                     p->last_wstatus = wstatus;
@@ -334,7 +318,8 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                         p->set_state(PM_TINY_PROG_STATE_EXIT);
                     }
                 } else {
-                    log_proc_exit_status(nullptr, rc, wstatus);
+                    std::string exit_info = pm_tiny::prog_info_t::log_proc_exit_status(nullptr, rc, wstatus);
+                    pm_tiny::logger->info(exit_info.c_str());
                 }
 
                 size_t proc_num = get_current_alive_prog(pm_tiny_progs);
@@ -539,6 +524,7 @@ void start(pm_tiny_server_t &pm_tiny_server) {
                                      sessions);
             }
         }
+        remove_closed_session(sessions);
     }
     if (sigprocmask(SIG_SETMASK, &osigmask, nullptr) == -1) {
         PM_TINY_LOG_E_SYS("sigprocmask");
@@ -665,6 +651,34 @@ void check_sock_has_event(int total_ready_fd,
                     auto wf = std::make_shared<pm_tiny::frame_t>();
                     pm_tiny::fappend_value(*wf, PM_TINY_VERSION);
                     session->write_frame(wf);
+                }else if(f_type==PM_TINY_FRAME_TYPE_SHOW_LOG){
+                    std::string name;
+                    ifs >> name;
+                    auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
+                                             [&name](const prog_ptr_t &prog) {
+                                                 return prog->name == name;
+                                             });
+                    auto wf = std::make_shared<pm_tiny::frame_t>();
+                    if (iter == pm_tiny_progs.end()) {
+                        pm_tiny::fappend_value<int>(*wf, 0x1);
+                        pm_tiny::fappend_value(*wf, "not found `" + name + "`");
+                    } else {
+                        bool is_alive = (*iter)->pid != -1;
+                        if (!is_alive) {
+                            pm_tiny::fappend_value<int>(*wf, 0x2);
+                            pm_tiny::fappend_value(*wf, "`" + name + "` not running");
+                        }else{
+#if PM_TINY_PTY_ENABLE
+                            (*iter)->add_session(session.get());
+                            pm_tiny::fappend_value<int>(*wf, 0);
+                            pm_tiny::fappend_value(*wf, "success");
+#else
+                            pm_tiny::fappend_value<int>(*wf, 0x4);
+                            pm_tiny::fappend_value(*wf, "This version does not support this function");
+#endif
+                        }
+                    }
+                    session->write_frame(wf);
                 } else {
                     pm_tiny::logger->info("unkown framae type:%#02X", f_type);
                 }
@@ -682,12 +696,16 @@ void check_sock_has_event(int total_ready_fd,
             _readyfd++;
         }
     }
-    if (closed_session) {
-        sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
-                                      [](const pm_tiny::session_ptr_t &session) {
-                                          return session->is_close();
-                                      }), sessions.end());
-    }
+//    if (closed_session) {
+//        remove_closed_session(sessions);
+//    }
+}
+
+void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions) {
+    sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
+                                  [](const pm_tiny::session_ptr_t &session) {
+                                      return session->is_close();
+                                  }), sessions.end());
 }
 
 std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_server,
@@ -861,7 +879,7 @@ static void daemonize() {
     if (i > 0) exit(0); /* parent exits */
     /* child (daemon) continues */
     setsid(); /* obtain a new process group */
-    for (i = getdtablesize(); i >= 0; --i) close(i); /* close all descriptors */
+    for (i = getdtablesize() - 1; i >= 0; --i) close(i); /* close all descriptors */
     i = open("/dev/null", O_RDWR);
     dup(i);
     dup(i); /* handle standart I/O */

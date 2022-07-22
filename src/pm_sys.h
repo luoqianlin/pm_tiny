@@ -8,8 +8,13 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <functional>
+#include <climits>
 
 namespace pm_tiny {
+    struct pty_info {
+        int master_fd;
+        char slave_name[PATH_MAX];
+    };
     struct passwd_t {
         std::string pw_name;        /* Username.  */
         std::string pw_passwd;        /* Password.  */
@@ -48,6 +53,7 @@ namespace pm_tiny {
     long long get_vm_rss_kib(int pid);
 
     int get_uid_from_username(const char *name, passwd_t &passwd);
+    int create_pty(struct pty_info *p);
 }
 
 #endif //PM_TINY_PM_SYS_H

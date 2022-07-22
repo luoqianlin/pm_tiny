@@ -8,11 +8,17 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <iostream>
+#include <utility>
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
 #include "pm_sys.h"
 
+#if PM_TINY_SERVER
+
+#include "prog.h"
+
+#endif
 namespace pm_tiny {
 
     std::ostream &operator<<(std::ostream &os, frame_t const &f) {
@@ -50,6 +56,12 @@ namespace pm_tiny {
 
     void session_t::close() {
         if (this->fd_ >= 0) {
+#if PM_TINY_SERVER
+            if (prog_) {
+                prog_->remove_session(this);
+                prog_ = nullptr;
+            }
+#endif
             ::close(this->fd_);
             this->fd_ = -1;
             this->fd_type_ = 0;
@@ -150,6 +162,14 @@ namespace pm_tiny {
         return (int) this->recv_buf.size() - 1;
     }
 
+    bool session_t::sbuf_empty() const {
+        return this->sbuf_size() == 0;
+    }
+
+    bool session_t::rbuf_empty() const {
+        return this->rbuf_size() == 0;
+    }
+
     frame_ptr_t session_t::read_frame(int block) {
         pm_tiny::frame_ptr_t uf;
         do {
@@ -177,11 +197,24 @@ namespace pm_tiny {
             int n = 0;
             do {
                 n += this->write();
-            } while (block && this->sbuf_size() > 1 && !this->is_close());
+            } while (block && this->sbuf_size() > 0 && !this->is_close());
             return n;
         } else {
             return -1;
         }
     }
+
+#if PM_TINY_SERVER
+
+    void session_t::set_prog(prog_info_t *prog) {
+        this->prog_ = prog;
+        this->is_new_created_=true;
+    }
+
+    prog_info_t *session_t::get_prog() {
+        return this->prog_;
+    }
+
+#endif
 
 }

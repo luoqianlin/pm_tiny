@@ -4,16 +4,17 @@
 
 #include "prog.h"
 #include "log.h"
+#include <assert.h>
 
 namespace pm_tiny {
-     auto f_close (int &fd) {
+    auto f_close(int &fd) {
         if (fd >= 0) {
             close(fd);
             fd = -1;
         }
     };
 
-     auto f_log_open(std::string &path, int oflag = O_CREAT | O_RDWR) {
+    auto f_log_open(std::string &path, int oflag = O_CREAT | O_RDWR) {
         const char *file = path.c_str();
         int fd = open(file, oflag, S_IRUSR | S_IWUSR);
         if (fd == -1) {
@@ -22,7 +23,7 @@ namespace pm_tiny {
         return fd;
     };
 
-     auto get_file_size(int fd) {
+    auto get_file_size(int fd) {
         struct stat st;
         int rc = fstat(fd, &st);
         if (rc == -1) {
@@ -30,7 +31,6 @@ namespace pm_tiny {
         }
         return st.st_size;
     };
-
 
 
     std::ostream &operator<<(std::ostream &os, struct prog_info_t const &prog) {
@@ -82,7 +82,9 @@ namespace pm_tiny {
     }
 
     void prog_info_t::init_prog_log() {
+        cache_log.resize(0);
         for (int i = 0; i < 2; i++) {
+            if (this->logfile[i].empty())continue;
             int oflag = O_CREAT | O_RDWR;
             this->logfile_fd[i] = f_log_open(this->logfile[i], oflag);
             lseek64(this->logfile_fd[i], 0, SEEK_END);
@@ -99,6 +101,9 @@ namespace pm_tiny {
         int &fd = this->rpipefd[i];
         ioctl(fd, FIONREAD, &nread);
 //            printf("FIONREAD:%d\n",nread);
+        std::string msg_content;
+        int msg_type;
+        bool s_writeable = this->is_sessions_writeable();
         if (nread == 0) {
             close(fd);
             close(this->logfile_fd[i]);
@@ -106,10 +111,19 @@ namespace pm_tiny {
                           this->backup_pid, fd);
             fd = -1;
             this->logfile_fd[i] = -1;
+            msg_type = 0;
+            msg_content = log_proc_exit_status(this, pid, last_wstatus);
+            msg_content += "\n";
+            s_writeable = true;
         } else {
+            msg_type = 1;
             int remaining_bytes = nread;
             do {
                 int max_nread;
+
+                if (!s_writeable) {
+                    break;
+                }
 #if PM_TINY_PIPE_SPLICE
                 max_nread = remaining_bytes;
 #else
@@ -139,19 +153,23 @@ namespace pm_tiny {
                 int exceed_n = off_out + remaining_bytes - this->logfile_maxsize;
 
                 if (exceed_n > 0) {
-                    max_nread = this->logfile_maxsize - off_out;
+                    max_nread = std::min(int(this->logfile_maxsize - off_out), max_nread);
                 }
 #if PM_TINY_PIPE_SPLICE
-                do {
-                    rc = splice(fd, nullptr, this->logfile_fd[i],
-                                nullptr, (size_t) max_nread, 0);
-                } while (rc == -1 && errno == EAGAIN);
+                    do {
+                        rc = splice(fd, nullptr, this->logfile_fd[i],
+                                    nullptr, (size_t) max_nread, 0);
+                    } while (rc == -1 && errno == EAGAIN);
 #else
+                assert(max_nread <= sizeof(buffer));
                 rc = (int) pm_tiny::safe_read(fd, buffer, max_nread);
 #endif
                 if (rc > 0) {
 #if !PM_TINY_PIPE_SPLICE
                     pm_tiny::safe_write(this->logfile_fd[i], buffer, rc);
+#if PM_TINY_PTY_ENABLE
+                    msg_content += std::string(buffer, rc);
+#endif
 #endif
                     this->logfile_size[i] += rc;
                     remaining_bytes -= rc;
@@ -162,5 +180,99 @@ namespace pm_tiny {
                 }
             } while (remaining_bytes > 0);
         }
+
+#if PM_TINY_PTY_ENABLE
+        if (s_writeable) {
+            this->write_msg_to_sessions(msg_type, msg_content);
+        }
+#endif
+    }
+
+    void prog_info_t::write_msg_to_sessions(int msg_type, std::string &msg_content) {
+        auto wf = std::make_shared<pm_tiny::frame_t>();
+        pm_tiny::fappend_value<int>(*wf, msg_type);
+        pm_tiny::fappend_value(*wf, msg_content);
+        int cur_cache_log_size = (int) cache_log.size();
+        int new_msg_len = (int) msg_content.size();
+        int total = cur_cache_log_size + new_msg_len;
+        int remain = MAX_CACHE_LOG_LEN - total;
+        if (remain >= 0) {
+            std::copy(msg_content.begin(), msg_content.end(),
+                      std::back_inserter(cache_log));
+        } else {
+            int move_out = -remain;
+            if (move_out < cur_cache_log_size) {
+                int N = cur_cache_log_size - move_out;
+                for (int i = 0; i < N; i++) {
+                    cache_log[i] = cache_log[i + move_out];
+                }
+                for (int i = N; i < cur_cache_log_size; i++) {
+                    cache_log[i] = msg_content[i - N];
+                }
+                std::copy(msg_content.begin() + move_out, msg_content.end(),
+                          std::back_inserter(cache_log));
+            } else {
+                cache_log.resize(MAX_CACHE_LOG_LEN);
+                std::copy(msg_content.begin() + (move_out - cur_cache_log_size), msg_content.end(),
+                          cache_log.begin());
+            }
+        }
+        std::string prev_log(cache_log.data(), cache_log.size());
+        auto new_frame = std::make_shared<pm_tiny::frame_t>();
+        pm_tiny::fappend_value<int>(*new_frame, msg_type);
+        pm_tiny::fappend_value(*new_frame, prev_log);
+
+        for (auto &session: sessions) {
+            if (session->is_new_created_) {
+                session->write_frame(new_frame);
+                session->is_new_created_ = false;
+            } else {
+                session->write_frame(wf);
+            }
+        }
+    }
+
+    bool prog_info_t::remove_session(session_t *session) {
+        sessions.erase(std::remove(sessions.begin(), sessions.end(), session),
+                       sessions.end());
+        return true;
+    }
+
+    void prog_info_t::add_session(session_t *session) {
+        this->sessions.emplace_back(session);
+        session->set_prog(this);
+    }
+
+    bool prog_info_t::is_sessions_writeable() {
+        for (auto &session: this->sessions) {
+            if (session->sbuf_size() > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::string prog_info_t::log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus) {
+        const char *prog_name = "Unkown";
+        float run_time = NAN;
+        int restart_count = 0;
+        if (prog) {
+            prog_name = (char *) prog->name.c_str();
+            run_time = (float) (pm_tiny::time::gettime_monotonic_ms() - prog->last_startup_ms) / (60 * 1000.0f);
+            restart_count = prog->dead_count;
+        }
+        char s_buff[1024];
+        if (WIFEXITED(wstatus)) {
+            int exit_code = WEXITSTATUS(wstatus);
+            snprintf(s_buff, sizeof(s_buff), "pid:%d name:%s exited, exit code %d run time:%.3f minutes restart:%d\n",
+                     pid, prog_name, exit_code, run_time, restart_count);
+        } else if (WIFSIGNALED(wstatus)) {
+            int kill_signo = WTERMSIG(wstatus);
+            char buf[80] = {0};
+            mgr::utils::signal::signo_to_str(kill_signo, buf, false);
+            snprintf(s_buff, sizeof(s_buff), "pid:%d name:%s killed by signal %s run time:%.3f minutes restart:%d\n",
+                     pid, prog_name, buf, run_time, restart_count);
+        }
+        return s_buff;
     }
 }

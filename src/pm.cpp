@@ -372,12 +372,44 @@ void show_version(pm_tiny::session_t&session){
         fprintf(stdout, "%s\n", version.c_str());
     }
 }
+
+void show_prog_log(pm_tiny::session_t &session, const std::string &app_name) {
+    pm_tiny::frame_ptr_t f = std::make_shared<pm_tiny::frame_t>();
+    f->push_back(PM_TINY_FRAME_TYPE_SHOW_LOG);
+    pm_tiny::fappend_value(*f, app_name);
+    session.write_frame(f, 1);
+    auto rf = session.read_frame(1);
+    if (rf) {
+        pm_tiny::iframe_stream ifs(*rf);
+        int code = 0;
+        std::string msg;
+        ifs >> code;
+        ifs >> msg;
+        if (code != 0) {
+            show_msg(code, msg);
+        } else {
+            int msg_type = 0;
+            std::string msg_content;
+            do {
+                rf = session.read_frame(1);
+                pm_tiny::iframe_stream ifs(*rf);
+                ifs >> msg_type;
+                ifs >> msg_content;
+                printf("%s", msg_content.c_str());
+                fflush(stdout);
+            } while (msg_type != 0);
+        }
+    }
+}
+
 void show_usage(int argc, char *argv[]) {
     fprintf(stdout, "usage: %s <command> [options]\n\n", argv[0]);
     fprintf(stdout, "- Start and add a process to the pm_tiny process list:\n\n");
     fprintf(stdout, "\033[36m$ pm start \"node test.js arg0 arg1\" --name app_name [--kill_timeout second] \n\n\033[0m");
     fprintf(stdout, "- Show the process list:\n\n");
     fprintf(stdout, "\033[36m$ pm ls\n\n\033[0m");
+    fprintf(stdout, "- Show the process output:\n\n");
+    fprintf(stdout, "\033[36m$ pm log app_name\n\n\033[0m");
     fprintf(stdout, "- Stop and delete a process from the pm process list:\n\n");
     fprintf(stdout, "\033[36m$ pm delete app_name\n\n\033[0m");
     fprintf(stdout, "- Stop, start and restart a process from the process list:\n\n");
@@ -532,6 +564,14 @@ int main(int argc, char *argv[]) {
         restart_prog(*cmd_opt.session, cmd_opt.argv[1]);
         return nullptr;
     };
+
+
+    auto log_fun = [](cmd_opt_t &cmd_opt) -> void * {
+        show_prog_log(*cmd_opt.session, cmd_opt.argv[1]);
+        return nullptr;
+    };
+
+
     std::vector<cmd_opt_t> cmd_opts{
             make_cmd_opt("start", start_fun, 1),
             make_cmd_opt("stop", stop_fun, 1),
@@ -541,6 +581,7 @@ int main(int argc, char *argv[]) {
             make_cmd_opt("ls", list_fun, 0),
             make_cmd_opt("status", list_fun, 0),
             make_cmd_opt("save", save_fun, 0),
+            make_cmd_opt("log", log_fun, 1),
 
     };
     cmd_opt_t *cmd_opt = nullptr;

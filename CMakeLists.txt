@@ -4,7 +4,6 @@ project(pm_tiny)
 set(CMAKE_CXX_STANDARD 14)
 
 add_definitions(
-        -DPM_TINY_PIPE_SPLICE=1
         -DPM_TINY_VERSION="1.0.1"
 )
 
@@ -19,6 +18,12 @@ add_executable(pm_tiny src/pm_tiny.cpp src/pm_tiny_server.cpp
         src/pm_tiny_helper.cpp src/procinfo.cpp
         src/log.h src/time_util.cpp src/log.cpp
         src/globals.cpp
+        )
+
+target_compile_definitions(pm_tiny
+        PUBLIC PM_TINY_SERVER=1
+        PM_TINY_PTY_ENABLE=1
+        PM_TINY_PIPE_SPLICE=0
         )
 
 add_executable(pm src/pm.cpp src/session.cpp

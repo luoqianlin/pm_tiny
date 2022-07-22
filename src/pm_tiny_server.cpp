@@ -108,10 +108,16 @@ namespace pm_tiny {
         auto prog_info = std::make_shared<pm_tiny::prog_info_t>();
         prog_info->rpipefd[0] = prog_info->rpipefd[1] = -1;
         prog_info->logfile_fd[0] = prog_info->logfile_fd[1] = -1;
+#if !PM_TINY_PTY_ENABLE
         prog_info->logfile[0] = app_log_dir;
         prog_info->logfile[0] += ("/" + app_name + "_stdout.log");
         prog_info->logfile[1] = app_log_dir;
         prog_info->logfile[1] += ("/" + app_name + "_stderr.log");
+#else
+        prog_info->logfile[0] = app_log_dir;
+        prog_info->logfile[0] += ("/" + app_name + ".log");
+        prog_info->logfile[1] = "";
+#endif
         prog_info->name = app_name;
         prog_info->work_dir = cwd;
         prog_info->dead_count = 0;
@@ -228,10 +234,11 @@ namespace pm_tiny {
     }
 
     int pm_tiny_server_t::real_spawn_prog(pm_tiny::prog_info_t &prog) {
-        int pipefd[2];
-        int pipefd2[2];
         volatile int failed = 0;
         int tmp_errno;
+#if !PM_TINY_PTY_ENABLE
+        int pipefd[2];
+        int pipefd2[2];
         if (pipe(pipefd) == -1) {
             tmp_errno = errno;
             logger->syscall_errorlog("pipe");
@@ -246,6 +253,15 @@ namespace pm_tiny {
             errno = tmp_errno;
             return -1;
         }
+#else
+        struct pm_tiny::pty_info pti;
+        if (pm_tiny::create_pty(&pti) != 0) {
+            tmp_errno = errno;
+            logger->syscall_errorlog("create pty");
+            errno = tmp_errno;
+            return -1;
+        }
+#endif
         sigset_t omask;
         /* Careful: don't be affected by a signal in vforked child */
         mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK,&omask);
@@ -259,23 +275,28 @@ namespace pm_tiny {
         }
         if (pid > 0) {
             sigprocmask(SIG_SETMASK,&omask, nullptr);
-            close(pipefd[1]);
-            close(pipefd2[1]);
             prog.pid = pid;
             prog.backup_pid = pid;
+#if !PM_TINY_PTY_ENABLE
+            close(pipefd[1]);
+            close(pipefd2[1]);
             prog.rpipefd[0] = pipefd[0];
             prog.rpipefd[1] = pipefd2[0];
-            prog.last_startup_ms = pm_tiny::time::gettime_monotonic_ms();
             int rc = pm_tiny::set_nonblock(pipefd[0]);
             if (rc == -1) {
                 logger->syscall_errorlog("fcntl");
             }
+#else
+            prog.rpipefd[0] = pti.master_fd;
+#endif
+            prog.last_startup_ms = pm_tiny::time::gettime_monotonic_ms();
             logger->info("startup %s pid:%d\n", prog.name.c_str(), pid);
         } else {
             /* Reset signal handlers that were set by the parent process */
             reset_sighandlers_and_unblock_sigs();
             /* Create a new session and make ourself the process group leader */
             setsid();
+#if !PM_TINY_PTY_ENABLE
             close(pipefd[0]);
             close(pipefd2[0]);
             int null_fd = open("/dev/null", O_RDWR);
@@ -285,7 +306,21 @@ namespace pm_tiny {
             close(null_fd);
             close(pipefd[1]);
             close(pipefd2[1]);
-            for (int i = getdtablesize(); i > 2; --i) {
+#else
+            close(pti.master_fd);
+            int pty_fd = open(pti.slave_name, O_RDWR);
+            if (pty_fd >= 0) {
+                dup2(pty_fd, 0);
+                dup2(pty_fd, 1);
+                dup2(pty_fd, 2);
+                close(pty_fd);
+            } else {
+                failed = errno;
+                _exit(112);
+            }
+#endif
+
+            for (int i = getdtablesize() - 1; i > 2; --i) {
                 close(i);
             }
             int rc;

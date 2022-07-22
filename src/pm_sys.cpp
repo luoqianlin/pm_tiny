@@ -192,7 +192,8 @@ namespace pm_tiny {
         vm_rss_kib = vm_rss_kib * page_size / 1024;
         return vm_rss_kib;
     }
-    int get_uid_from_username(const char*name,passwd_t&passwd_){
+
+    int get_uid_from_username(const char *name, passwd_t &passwd_) {
         struct passwd pwd;
         struct passwd *result;
         size_t bufsize;
@@ -212,13 +213,49 @@ namespace pm_tiny {
             }
             return -1;
         }
-        passwd_.pw_dir=pwd.pw_dir;
-        passwd_.pw_gecos=pwd.pw_gecos;
-        passwd_.pw_gid=pwd.pw_gid;
-        passwd_.pw_name=pwd.pw_name;
-        passwd_.pw_passwd=pwd.pw_passwd;
-        passwd_.pw_shell=pwd.pw_shell;
-        passwd_.pw_uid=pwd.pw_uid;
+        passwd_.pw_dir = pwd.pw_dir;
+        passwd_.pw_gecos = pwd.pw_gecos;
+        passwd_.pw_gid = pwd.pw_gid;
+        passwd_.pw_name = pwd.pw_name;
+        passwd_.pw_passwd = pwd.pw_passwd;
+        passwd_.pw_shell = pwd.pw_shell;
+        passwd_.pw_uid = pwd.pw_uid;
         return 0;
+    }
+
+
+    int create_pty(struct pty_info *p) {
+        errno = 0;
+
+        do {
+            if (p == nullptr) {
+                errno = EINVAL;
+                break;
+            }
+
+            p->master_fd = posix_openpt(O_RDWR);
+            if (p->master_fd < 0) {
+                perror("posix_openpt() failed");
+                break;
+            }
+            if (grantpt(p->master_fd) != 0) {
+                perror("grantpt() failed");
+                break;
+            }
+            if (unlockpt(p->master_fd) != 0) {
+                perror("unlockpt() failed");
+                break;
+            }
+
+            if (ptsname_r(p->master_fd, p->slave_name, PATH_MAX) != 0) {
+                perror("ptsname_r() failed");
+                break;
+            }
+        } while (false);
+        int failno = errno;
+        if (failno && p && p->master_fd >= 0) {
+            close(p->master_fd);
+        }
+        return failno;
     }
 }

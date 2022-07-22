@@ -20,9 +20,9 @@
 #include <type_traits>
 #include "frame_stream.hpp"
 
-
 namespace pm_tiny {
 
+    struct prog_info_t;
 
     class session_t {
 
@@ -52,18 +52,33 @@ namespace pm_tiny {
 
         int rbuf_size() const;
 
+        bool sbuf_empty() const;
+
+        bool rbuf_empty() const;
+
         frame_ptr_t read_frame(int block = 0);
 
         int write_frame(const pm_tiny::frame_ptr_t &f, int block = 0);
 
+#if PM_TINY_SERVER
+        bool is_new_created_ = false;
+
+        void set_prog(prog_info_t *prog);
+
+        prog_info_t *get_prog();
+#endif
     private:
         int fd_ = -1;
         int fd_type_ = 0;
         int fsbuf_size_ = 0;
         int frbuf_size_ = 0;
         int fd_nonblock_ = 0;
-        std::deque<frame_ptr_t> recv_buf = {std::make_shared<frame_t>()};
+        std::deque<frame_ptr_t> recv_buf = {std::make_shared<frame_t>()};//last item as tmp buffer
         std::deque<frame_ptr_t> send_buf = {};
+#if PM_TINY_SERVER
+        prog_info_t* prog_=nullptr;
+
+#endif
     };
 
     using session_ptr_t = std::shared_ptr<pm_tiny::session_t>;

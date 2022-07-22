@@ -42,6 +42,7 @@
 #include "procinfo.h"
 
 namespace pm_tiny {
+    class session_t;
     struct prog_info_t {
         pid_t pid = -1;
         pid_t backup_pid = -1;
@@ -67,6 +68,10 @@ namespace pm_tiny {
         std::vector <std::string> envs;
         int kill_timeout_sec = 3;//3s
         std::string run_as;
+        const int MAX_CACHE_LOG_LEN = 1024;
+        std::vector<char> cache_log;
+
+        std::vector<session_t*> sessions;
 
         void close_pipefds();
 
@@ -86,6 +91,15 @@ namespace pm_tiny {
 
         void read_pipe(int i);
 
+        bool remove_session(session_t *session);
+
+        void write_msg_to_sessions(int msg_type,std::string&msg_content);
+
+        bool is_sessions_writeable();
+
+        void add_session(session_t *session);
+
+       static std::string log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus);
     };
     std::ostream &operator<<(std::ostream &os, struct prog_info_t const &prog);
 }
