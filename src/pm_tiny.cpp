@@ -26,7 +26,8 @@ void check_listen_sock_has_event(int sock_fd,
 pm_tiny::frame_ptr_t make_prog_info_data(proglist_t &pm_tiny_progs);
 
 std::shared_ptr<pm_tiny::frame_t>
-handle_cmd_start(pm_tiny_server_t &pm_tiny_server, pm_tiny::iframe_stream &ifs);
+handle_cmd_start(pm_tiny_server_t &pm_tiny_server, pm_tiny::iframe_stream &ifs,
+                 std::shared_ptr<pm_tiny::session_t> &session);
 
 void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions);
 
@@ -581,7 +582,7 @@ void check_sock_has_event(int total_ready_fd,
                     }
                     session->write_frame(wf);
                 } else if (f_type == 0x25) {//start
-                    std::shared_ptr<pm_tiny::frame_t> wf = handle_cmd_start(pm_tiny_server, ifs);
+                    std::shared_ptr<pm_tiny::frame_t> wf = handle_cmd_start(pm_tiny_server, ifs,session);
                     session->write_frame(wf);
                 } else if (f_type == 0x26) {//save
                     auto wf = std::make_shared<pm_tiny::frame_t>();
@@ -709,7 +710,8 @@ void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions) {
 }
 
 std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_server,
-                                                   pm_tiny::iframe_stream &ifs) {
+                                                   pm_tiny::iframe_stream &ifs,
+                                                   std::shared_ptr<pm_tiny::session_t> &session) {
     proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
     //name:cwd:command
     std::string name;
@@ -719,6 +721,7 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
     int env_num;
     int kill_timeout;
     std::string run_as;
+    int show_log=0;
     ifs >> name >> cwd >> command >> local_resolved >> env_num;
     std::vector<std::string> envs;
     envs.resize(env_num);
@@ -727,6 +730,7 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
     }
     ifs >> kill_timeout;
     ifs >> run_as;
+    ifs >> show_log;
 //   std::cout << "name:`" + name << "` cwd:`" << cwd << "` command:`" << command
 //   << "` local_resolved:" << local_resolved << std::endl;
 //    PM_TINY_LOG_D("run_as:%s",run_as.c_str());
@@ -735,29 +739,44 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
                                  return prog->name == name;
                              });
     auto wf = std::make_shared<pm_tiny::frame_t>();
+    auto prog_bind_session = [&session](prog_ptr_t &prog,
+                                        pm_tiny::frame_ptr_t &wf) {
+#if PM_TINY_PTY_ENABLE
+        prog->add_session(session.get());
+        pm_tiny::fappend_value<int>(*wf, 1);
+        pm_tiny::fappend_value(*wf, "success");
+#else
+        pm_tiny::fappend_value<int>(*wf, 2);
+        pm_tiny::fappend_value(*wf, "This version does not support log display");
+#endif
+    };
     if (iter == pm_tiny_progs.end()) {
-        const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
+        prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
         if (!prog) {
-            pm_tiny::fappend_value<int>(*wf, 0x3);
+            pm_tiny::fappend_value<int>(*wf, -0x3);
             pm_tiny::fappend_value(*wf, "create `" + name + "` fail");
         } else {
             int ret = pm_tiny_server.start_and_add_prog(prog);
             if (ret == -1) {
                 std::string errmsg(strerror(errno));
-                pm_tiny::fappend_value<int>(*wf, 1);
+                pm_tiny::fappend_value<int>(*wf, -1);
                 pm_tiny::fappend_value(*wf, errmsg);
             } else {
-                pm_tiny::fappend_value<int>(*wf, 0);
-                pm_tiny::fappend_value(*wf, "success");
+                if (show_log) {
+                    prog_bind_session(prog, wf);
+                } else {
+                    pm_tiny::fappend_value<int>(*wf, 0);
+                    pm_tiny::fappend_value(*wf, "success");
+                }
             }
         }
     } else {
         prog_ptr_t _p = *iter;
         if (_p->pid == -1) {
-            const prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
+            prog_ptr_t prog = pm_tiny_server.create_prog(name, cwd, command, envs,kill_timeout,run_as);
             if (local_resolved && prog
                 && (prog->work_dir != _p->work_dir || prog->args != _p->args)) {
-                pm_tiny::fappend_value<int>(*wf, 4);
+                pm_tiny::fappend_value<int>(*wf, -4);
                 pm_tiny::fappend_value(*wf, "The cwd or command or environ has changed,"
                                             " please run the delete operation first");
             } else {
@@ -765,15 +784,19 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
                 int rc = pm_tiny_server.start_prog(_p);
                 if (rc == -1) {
                     std::string errmsg(strerror(errno));
-                    pm_tiny::fappend_value<int>(*wf, 1);
+                    pm_tiny::fappend_value<int>(*wf, -1);
                     pm_tiny::fappend_value(*wf, errmsg);
                 } else {
-                    pm_tiny::fappend_value<int>(*wf, 0);
-                    pm_tiny::fappend_value(*wf, "success");
+                    if(show_log){
+                        prog_bind_session(prog,wf);
+                    }else {
+                        pm_tiny::fappend_value<int>(*wf, 0);
+                        pm_tiny::fappend_value(*wf, "success");
+                    }
                 }
             }
         } else {
-            pm_tiny::fappend_value<int>(*wf, 2);
+            pm_tiny::fappend_value<int>(*wf, -2);
             pm_tiny::fappend_value(*wf, "`" + name + "` already running");
         }
     }
