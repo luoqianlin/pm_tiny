@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <memory>
 
+
 #include "log.h"
 #include "time_util.h"
 #include "globals.h"
@@ -257,5 +258,9 @@ namespace pm_tiny {
             close(p->master_fd);
         }
         return failno;
+    }
+
+    int tcsetattr_stdin_TCSANOW(const struct ::termios *tp) {
+        return tcsetattr(STDIN_FILENO, TCSANOW, tp);
     }
 }

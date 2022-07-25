@@ -30,8 +30,11 @@
 #include "frame_stream.hpp"
 #include "string_utils.h"
 #include "memory_util.h"
+#include "ANSI_color.h"
 
 using pm_tiny::operator<<;
+
+static sig_atomic_t is_stop = 0;
 
 struct proc_info_t {
     int pid;
@@ -49,6 +52,7 @@ std::ostream &operator<<(std::ostream &os, proc_info_t const &p) {
        << p.restart_count << " " << p.state;
     return os;
 }
+
 void loop_read_show_process_log(pm_tiny::session_t &session);
 
 std::string pm_state_to_str(int state) {
@@ -92,11 +96,11 @@ void display_proc_infos(pm_tiny::session_t &session) {
             ifs >> proc_infos[i].command;
             ifs >> proc_infos[i].restart_count;
             ifs >> proc_infos[i].state;
-            ifs>>proc_infos[i].vm_rss_kib;
+            ifs >> proc_infos[i].vm_rss_kib;
         }
         const int COLUMN_NUM = 7;
         int column_widths[COLUMN_NUM];
-        std::string heads[COLUMN_NUM] = {"pid", "name", "cwd", "command", "restart", "state","memory"};
+        std::string heads[COLUMN_NUM] = {"pid", "name", "cwd", "command", "restart", "state", "memory"};
         printf("Total:%ld\n", proc_infos.size());
         for (int i = 0; i < COLUMN_NUM; i++) {
             column_widths[i] = (int) heads[i].length();
@@ -193,7 +197,7 @@ void display_proc_infos(pm_tiny::session_t &session) {
                    column_widths[2], truncate_long_str(p.work_dir, column_widths[2]).c_str(),
                    column_widths[3], truncate_long_str(p.command, column_widths[3]).c_str(),
                    column_widths[4], p.restart_count,
-                   column_widths[5] + 11, s_state.c_str(),column_widths[6],mem_size_str.c_str()
+                   column_widths[5] + 11, s_state.c_str(), column_widths[6], mem_size_str.c_str()
             );
         }
         if (!proc_infos.empty()) {
@@ -224,8 +228,8 @@ void stop_proc(pm_tiny::session_t &session, const std::string &app_name) {
 
 void start_proc(pm_tiny::session_t &session,
                 const std::string &cmd,
-                const std::string &named,int kill_timeout,
-                const std::string&run_as,bool show_log) {
+                const std::string &named, int kill_timeout,
+                const std::string &run_as, bool show_log) {
     std::vector<std::string> args;
     mgr::utils::split(cmd, {' ', '\t'}, std::back_inserter(args));
     std::for_each(args.begin(), args.end(), mgr::utils::trim);
@@ -285,8 +289,8 @@ void start_proc(pm_tiny::session_t &session,
         char *thisEnv = *env;
         pm_tiny::fappend_value(*f, thisEnv);
     }
-    pm_tiny::fappend_value(*f,kill_timeout);
-    pm_tiny::fappend_value(*f,run_as);
+    pm_tiny::fappend_value(*f, kill_timeout);
+    pm_tiny::fappend_value(*f, run_as);
     pm_tiny::fappend_value<int>(*f, show_log ? 1 : 0);
     session.write_frame(f, 1);
     auto rf = session.read_frame(1);
@@ -366,7 +370,7 @@ void restart_prog(pm_tiny::session_t &session, const std::string &app_name) {
     }
 }
 
-void show_version(pm_tiny::session_t&session){
+void show_version(pm_tiny::session_t &session) {
     pm_tiny::frame_ptr_t f = std::make_shared<pm_tiny::frame_t>();
     f->push_back(0x29);
     session.write_frame(f, 1);
@@ -379,17 +383,41 @@ void show_version(pm_tiny::session_t&session){
         fprintf(stdout, "%s\n", version.c_str());
     }
 }
-void loop_read_show_process_log(pm_tiny::session_t &session){
+
+void loop_read_show_process_log(pm_tiny::session_t &session) {
     int msg_type = 0;
     std::string msg_content;
-    do {
-        auto rf = session.read_frame(1);
+    int fd = session.get_fd();
+    fd_set rfds;
+    int rc;
+    while (!is_stop) {
+        if (session.is_close()) {
+            break;
+        }
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        rc = select(fd + 1, &rfds, nullptr, nullptr, nullptr);
+        if (rc == -1) {
+            if (errno == EINTR) {
+                continue;
+            } else {
+                perror("select");
+                exit(EXIT_FAILURE);
+            }
+        }
+        auto rf = session.read_frame();
+        if (!rf)continue;
         pm_tiny::iframe_stream ifs(*rf);
         ifs >> msg_type;
         ifs >> msg_content;
         printf("%s", msg_content.c_str());
         fflush(stdout);
-    } while (msg_type != 0);
+        if (msg_type == 0) {
+            break;
+        }
+    }
+    printf("%s", PM_TINY_ANSI_COLOR_REST);
+    fflush(stdout);
 }
 
 void show_prog_log(pm_tiny::session_t &session, const std::string &app_name) {
@@ -415,7 +443,8 @@ void show_prog_log(pm_tiny::session_t &session, const std::string &app_name) {
 void show_usage(int argc, char *argv[]) {
     fprintf(stdout, "usage: %s <command> [options]\n\n", argv[0]);
     fprintf(stdout, "- Start and add a process to the pm_tiny process list:\n\n");
-    fprintf(stdout, "\033[36m$ pm start \"node test.js arg0 arg1\" --name app_name [--kill_timeout second] [--log]\n\n\033[0m");
+    fprintf(stdout,
+            "\033[36m$ pm start \"node test.js arg0 arg1\" --name app_name [--kill_timeout second] [--log]\n\n\033[0m");
     fprintf(stdout, "- Show the process list:\n\n");
     fprintf(stdout, "\033[36m$ pm ls\n\n\033[0m");
     fprintf(stdout, "- Show the process output:\n\n");
@@ -474,16 +503,16 @@ int main(int argc, char *argv[]) {
         std::string named;
         std::string kill_timeout_str = "3";
         std::string run_as;
-        int kill_timeout=3;
+        int kill_timeout = 3;
         int option_index = 0;
-        bool show_log=false;
+        bool show_log = false;
         optind = 2;
         static struct option long_options[] = {
-                {"name", required_argument, 0, 0},
+                {"name",         required_argument, 0, 0},
                 {"kill_timeout", required_argument, 0, 0},
-                {"run_as", required_argument, 0, 0},
-                {"log", no_argument, 0, 0},
-                {nullptr, 0,                0, 0}
+                {"run_as",       required_argument, 0, 0},
+                {"log",          no_argument,       0, 0},
+                {nullptr, 0,                        0, 0}
         };
         int c;
         while (true) {
@@ -518,7 +547,7 @@ int main(int argc, char *argv[]) {
         } catch (const std::invalid_argument &e) {
             kill_timeout = 3;
         }
-        start_proc(*cmd_opt.session, cmd_opt.argv[1], named,kill_timeout,run_as,show_log);
+        start_proc(*cmd_opt.session, cmd_opt.argv[1], named, kill_timeout, run_as, show_log);
         return nullptr;
     };
     auto version_fun = [](cmd_opt_t &cmd_opt) -> void * {
@@ -631,6 +660,13 @@ int main(int argc, char *argv[]) {
 
 
     if (pm_tiny::set_sigaction(SIGPIPE, SIG_IGN) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+    auto sigint_handler = [](int sig) {
+        is_stop = 1;
+    };
+    if (pm_tiny::set_sigaction(SIGINT, sigint_handler) == -1) {
         perror("sigaction");
         exit(EXIT_FAILURE);
     }

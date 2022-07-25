@@ -208,7 +208,6 @@ namespace pm_tiny {
 
     void session_t::set_prog(prog_info_t *prog) {
         this->prog_ = prog;
-        this->is_new_created_=true;
     }
 
     prog_info_t *session_t::get_prog() {

@@ -16,14 +16,13 @@ add_executable(pm_tiny src/pm_tiny.cpp src/pm_tiny_server.cpp
         src/pm_sys.cpp
         src/pm_sys.h src/pm_tiny.h
         src/pm_tiny_helper.cpp src/procinfo.cpp
-        src/log.h src/time_util.cpp src/log.cpp
+        src/log.h src/time_util.cpp src/log.cpp src/string_utils.cpp
         src/globals.cpp
         )
 
 target_compile_definitions(pm_tiny
         PUBLIC PM_TINY_SERVER=1
         PM_TINY_PTY_ENABLE=1
-        PM_TINY_PIPE_SPLICE=0
         )
 
 add_executable(pm src/pm.cpp src/session.cpp
@@ -33,3 +32,7 @@ add_executable(pm src/pm.cpp src/session.cpp
         src/log.cpp src/memory_util.h src/memory_util.cpp
         src/globals.cpp
         )
+
+add_executable(string_utils_test
+        test/string_utils_test.cpp
+        src/string_utils.cpp)

@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <functional>
 #include <climits>
+#include <termios.h>
 
 namespace pm_tiny {
     struct pty_info {
@@ -54,6 +55,7 @@ namespace pm_tiny {
 
     int get_uid_from_username(const char *name, passwd_t &passwd);
     int create_pty(struct pty_info *p);
+    int  tcsetattr_stdin_TCSANOW(const struct ::termios *tp);
 }
 
 #endif //PM_TINY_PM_SYS_H

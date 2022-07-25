@@ -663,23 +663,28 @@ void check_sock_has_event(int total_ready_fd,
                     if (iter == pm_tiny_progs.end()) {
                         pm_tiny::fappend_value<int>(*wf, 0x1);
                         pm_tiny::fappend_value(*wf, "not found `" + name + "`");
+                        session->write_frame(wf);
                     } else {
                         bool is_alive = (*iter)->pid != -1;
                         if (!is_alive) {
                             pm_tiny::fappend_value<int>(*wf, 0x2);
                             pm_tiny::fappend_value(*wf, "`" + name + "` not running");
+                            session->write_frame(wf);
                         }else{
 #if PM_TINY_PTY_ENABLE
                             (*iter)->add_session(session.get());
                             pm_tiny::fappend_value<int>(*wf, 0);
                             pm_tiny::fappend_value(*wf, "success");
+                            session->write_frame(wf);
+                            (*iter)->write_cache_log_to_session(session.get());
 #else
                             pm_tiny::fappend_value<int>(*wf, 0x4);
                             pm_tiny::fappend_value(*wf, "This version does not support this function");
+                            session->write_frame(wf);
 #endif
                         }
                     }
-                    session->write_frame(wf);
+
                 } else {
                     pm_tiny::logger->info("unkown framae type:%#02X", f_type);
                 }
@@ -788,7 +793,7 @@ std::shared_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny_server_t &pm_tiny_ser
                     pm_tiny::fappend_value(*wf, errmsg);
                 } else {
                     if(show_log){
-                        prog_bind_session(prog,wf);
+                        prog_bind_session(_p,wf);
                     }else {
                         pm_tiny::fappend_value<int>(*wf, 0);
                         pm_tiny::fappend_value(*wf, "success");

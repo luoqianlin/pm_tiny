@@ -70,6 +70,7 @@ namespace pm_tiny {
         std::string run_as;
         const int MAX_CACHE_LOG_LEN = 4096;//4kb
         std::vector<char> cache_log;
+        std::string residual_log;
 
         std::vector<session_t*> sessions;
 
@@ -91,9 +92,15 @@ namespace pm_tiny {
 
         void read_pipe(int i);
 
+        std::string remove_ANSI_escape_code(const std::string& text);
+
+        void redirect_output_log(int i,std::string text);
+
         bool remove_session(session_t *session);
 
         void write_msg_to_sessions(int msg_type,std::string&msg_content);
+
+        void write_cache_log_to_session(session_t *session);
 
         bool is_sessions_writeable();
 

@@ -61,7 +61,6 @@ namespace pm_tiny {
         int write_frame(const pm_tiny::frame_ptr_t &f, int block = 0);
 
 #if PM_TINY_SERVER
-        bool is_new_created_ = false;
 
         void set_prog(prog_info_t *prog);
 

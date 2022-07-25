@@ -49,6 +49,9 @@ namespace mgr {
         }
 
 
+        std::pair<std::string, std::string> remove_ANSI_escape_code(const std::string &text);
+
+
         template<typename Out>
         void split(const std::string &s, const std::vector<char> &delims, Out result) {
             int i, prev_index = 0;
@@ -77,17 +80,17 @@ namespace mgr {
             return elems;
         }
 
-        inline std::string join(const std::vector<std::string> &strs, const std::string &delim=" ") {
+        inline std::string join(const std::vector<std::string> &strs, const std::string &delim = " ") {
             using namespace std::string_literals;
             return std::accumulate(strs.begin(),
-                                              strs.end(), ""s,
-                                              [&delim](const std::string &init, const std::string &v) {
-                                                  if (init.empty()) {
-                                                      return v;
-                                                  }else {
-                                                      return init + delim + v;
-                                                  }
-                                              });
+                                   strs.end(), ""s,
+                                   [&delim](const std::string &init, const std::string &v) {
+                                       if (init.empty()) {
+                                           return v;
+                                       } else {
+                                           return init + delim + v;
+                                       }
+                                   });
         }
     }
 

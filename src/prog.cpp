@@ -83,6 +83,7 @@ namespace pm_tiny {
 
     void prog_info_t::init_prog_log() {
         cache_log.resize(0);
+        residual_log = "";
         for (int i = 0; i < 2; i++) {
             if (this->logfile[i].empty())continue;
             int oflag = O_CREAT | O_RDWR;
@@ -94,13 +95,50 @@ namespace pm_tiny {
         }
     }
 
+    void prog_info_t::redirect_output_log(int i,std::string text){
+
+        auto rotate_log_file = [this](int i) {
+            close(this->logfile_fd[i]);
+            pm_tiny::logger_t::logfile_cycle_write(this->logfile[i], this->logfile_count);
+            int oflag = O_CREAT | O_RDWR | O_TRUNC;
+            this->logfile_fd[i] = pm_tiny::f_log_open(this->logfile[i], oflag);
+            this->logfile_size[i] = 0;
+        };
+
+        while (!text.empty()) {
+            int off_out = this->logfile_size[i];
+            if (off_out >= this->logfile_maxsize) {
+//                logger->info("exceeds the maximum file size of %ld bytes,truncate\n",
+//                             this->logfile_maxsize);
+                rotate_log_file(i);
+                off_out = 0;
+            }
+            int writeable_size = this->logfile_maxsize - off_out;
+            writeable_size = std::min(writeable_size, (int) text.size());
+            pm_tiny::safe_write(this->logfile_fd[i], text.c_str(), writeable_size);
+            this->logfile_size[i] += writeable_size;
+            if (writeable_size < text.size()) {
+                text = text.substr(writeable_size);
+            }else{
+                break;
+            }
+        }
+    }
+
+    std::string prog_info_t::remove_ANSI_escape_code(const std::string& text){
+        std::string output_text = this->residual_log + text;
+        auto pair = mgr::utils::remove_ANSI_escape_code(output_text);
+        this->residual_log = pair.second;
+        auto pure_text = pair.first;
+        return pure_text;
+    }
+
     void prog_info_t::read_pipe(int i) {
         int nread;
         int rc;
         char buffer[4096];
         int &fd = this->rpipefd[i];
         ioctl(fd, FIONREAD, &nread);
-//            printf("FIONREAD:%d\n",nread);
         std::string msg_content;
         int msg_type;
         bool s_writeable = this->is_sessions_writeable();
@@ -112,6 +150,7 @@ namespace pm_tiny {
             fd = -1;
             this->logfile_fd[i] = -1;
             msg_type = 0;
+            msg_content += "\n";
             msg_content = log_proc_exit_status(this, pid, last_wstatus);
             msg_content += "\n";
             s_writeable = true;
@@ -120,62 +159,23 @@ namespace pm_tiny {
             int remaining_bytes = nread;
             do {
                 int max_nread;
-
                 if (!s_writeable) {
                     break;
                 }
-#if PM_TINY_PIPE_SPLICE
-                max_nread = remaining_bytes;
-#else
                 max_nread = std::min(remaining_bytes, (int) sizeof(buffer));
-#endif
-
-//                    off64_t off_out;
-//                    off_out = lseek64(this->logfile_fd[i], 0, SEEK_END);
-//                    if (off_out == -1) {
-//                        logger->syscall_errorlog("name:%s pid:%d lseek64", this->name.c_str(), this->pid);
-//                        break;
-//                    }
-                auto rotate_log_file = [this](int i) {
-                    close(this->logfile_fd[i]);
-                    pm_tiny::logger_t::logfile_cycle_write(this->logfile[i], this->logfile_count);
-                    int oflag = O_CREAT | O_RDWR | O_TRUNC;
-                    this->logfile_fd[i] = pm_tiny::f_log_open(this->logfile[i], oflag);
-                    this->logfile_size[i] = 0;
-                };
-                int off_out = this->logfile_size[i];
-                if (off_out >= this->logfile_maxsize) {
-//                        logger->info("exceeds the maximum file size of %ld bytes,truncate\n",
-//                                     this->logfile_maxsize);
-                    rotate_log_file(i);
-                    off_out = 0;
-                }
-                int exceed_n = off_out + remaining_bytes - this->logfile_maxsize;
-
-                if (exceed_n > 0) {
-                    max_nread = std::min(int(this->logfile_maxsize - off_out), max_nread);
-                }
-#if PM_TINY_PIPE_SPLICE
-                    do {
-                        rc = splice(fd, nullptr, this->logfile_fd[i],
-                                    nullptr, (size_t) max_nread, 0);
-                    } while (rc == -1 && errno == EAGAIN);
-#else
                 assert(max_nread <= sizeof(buffer));
                 rc = (int) pm_tiny::safe_read(fd, buffer, max_nread);
-#endif
                 if (rc > 0) {
-#if !PM_TINY_PIPE_SPLICE
-                    pm_tiny::safe_write(this->logfile_fd[i], buffer, rc);
+                    std::string output_text(buffer, rc);
+                    auto pure_text = remove_ANSI_escape_code(output_text);
+                    redirect_output_log(i, pure_text);
 #if PM_TINY_PTY_ENABLE
-                    msg_content += std::string(buffer, rc);
+                    msg_content += output_text;
 #endif
-#endif
-                    this->logfile_size[i] += rc;
                     remaining_bytes -= rc;
                 } else if ((rc == -1 && errno != EINTR)) {
-                    logger->syscall_errorlog("name:%s pid:%d fdin:%d fdout:%d off_out:%d splice",
-                                             this->name.c_str(), this->pid, fd, this->logfile_fd[i], (int) off_out);
+                    logger->syscall_errorlog("name:%s pid:%d fdin:%d fdout:%d read",
+                                             this->name.c_str(), this->pid, fd, this->logfile_fd[i]);
                     break;
                 }
             } while (remaining_bytes > 0);
@@ -186,6 +186,16 @@ namespace pm_tiny {
             this->write_msg_to_sessions(msg_type, msg_content);
         }
 #endif
+    }
+
+    void prog_info_t::write_cache_log_to_session(session_t *session) {
+        if (!this->cache_log.empty()) {
+            std::string prev_log(cache_log.data(), cache_log.size());
+            auto new_frame = std::make_shared<pm_tiny::frame_t>();
+            pm_tiny::fappend_value<int>(*new_frame, 1);
+            pm_tiny::fappend_value(*new_frame, prev_log);
+            session->write_frame(new_frame);
+        }
     }
 
     void prog_info_t::write_msg_to_sessions(int msg_type, std::string &msg_content) {
@@ -217,18 +227,9 @@ namespace pm_tiny {
                           cache_log.begin());
             }
         }
-        std::string prev_log(cache_log.data(), cache_log.size());
-        auto new_frame = std::make_shared<pm_tiny::frame_t>();
-        pm_tiny::fappend_value<int>(*new_frame, msg_type);
-        pm_tiny::fappend_value(*new_frame, prev_log);
 
         for (auto &session: sessions) {
-            if (session->is_new_created_) {
-                session->write_frame(new_frame);
-                session->is_new_created_ = false;
-            } else {
-                session->write_frame(wf);
-            }
+            session->write_frame(wf);
         }
     }
 
