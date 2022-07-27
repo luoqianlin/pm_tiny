@@ -43,6 +43,7 @@
 
 namespace pm_tiny {
     class session_t;
+    class pm_tiny_server_t;
     struct prog_info_t {
         pid_t pid = -1;
         pid_t backup_pid = -1;
@@ -51,7 +52,6 @@ namespace pm_tiny {
         int64_t last_startup_ms = 0;
         int64_t last_dead_time_ms = 0;
         int last_wstatus = 0;
-        int pendding_signal = 0;
         int dead_count = 0;
         int dead_count_timer = 0;
         std::string name;
@@ -71,8 +71,11 @@ namespace pm_tiny {
         const int MAX_CACHE_LOG_LEN = 4096;//4kb
         std::vector<char> cache_log;
         std::string residual_log;
+        int64_t request_stop_timepoint = 0;
 
         std::vector<session_t*> sessions;
+
+        std::vector<std::function<void(pm_tiny_server_t& )>>kill_pendingtasks;
 
         void close_pipefds();
 
@@ -86,11 +89,13 @@ namespace pm_tiny {
          * */
         void close_fds() ;
 
+        void write_prog_exit_message();
+
         std::string get_dsc_name() const ;
 
         void init_prog_log();
 
-        void read_pipe(int i);
+        void read_pipe(int i,int killed=0);
 
         std::string remove_ANSI_escape_code(const std::string& text);
 
@@ -107,6 +112,14 @@ namespace pm_tiny {
         void add_session(session_t *session);
 
        static std::string log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus);
+
+        bool is_kill_timeout();
+
+        void async_force_kill();
+
+        void async_kill_prog();
+
+        void execute_penddingtasks(pm_tiny_server_t &pm_tiny_server);
     };
     std::ostream &operator<<(std::ostream &os, struct prog_info_t const &prog);
 }

@@ -186,6 +186,16 @@ namespace pm_tiny {
         return uf;
     }
 
+    frame_ptr_t session_t::get_frame_from_buf() {
+        pm_tiny::frame_ptr_t uf;
+        if (this->rbuf_size() > 0) {
+            auto f = this->recv_buf.front();
+            recv_buf.pop_front();
+            uf = std::make_shared<pm_tiny::frame_t>();
+            frame_unescape(f->begin(), f->end(), std::back_inserter(*uf));
+        }
+        return uf;
+    }
 
     int session_t::write_frame(const frame_ptr_t &f, int block) {
         auto wf = std::make_shared<pm_tiny::frame_t>();

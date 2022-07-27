@@ -5,6 +5,8 @@
 #include "prog.h"
 #include "log.h"
 #include <assert.h>
+#include "pm_tiny_server.h"
+#include "ANSI_color.h"
 
 namespace pm_tiny {
     auto f_close(int &fd) {
@@ -59,6 +61,16 @@ namespace pm_tiny {
         this->state = s;
     }
 
+    void prog_info_t::write_prog_exit_message() {
+        std::string msg_content;
+        int msg_type;
+        msg_type = 0;
+        msg_content +=PM_TINY_ANSI_COLOR_REST "\n\n";
+        msg_content += "PM_TINY MESSAGE:\n";
+        msg_content += log_proc_exit_status(this, pid, last_wstatus);
+        msg_content += "\n";
+        this->write_msg_to_sessions(msg_type, msg_content);
+    }
     /**
      * 监管的程序运行结束后会关闭pipefd,
      * select会监听到pipefd关闭进而关闭pipfd和对应的日志文件fd
@@ -67,11 +79,10 @@ namespace pm_tiny {
         for (int i = 0; i < 2; i++) {
             if (this->rpipefd[i] != -1
                 && this->logfile_fd[i] != -1) {
-//                    logger->debug("start safe close fds");
-                read_pipe(i);
-//                    logger->debug("end safe close fds");
+                read_pipe(i,1);
             }
         }
+        write_prog_exit_message();
         this->close_pipefds();
         this->close_logfds();
         this->pid = -1;
@@ -133,59 +144,54 @@ namespace pm_tiny {
         return pure_text;
     }
 
-    void prog_info_t::read_pipe(int i) {
+    void prog_info_t::read_pipe(int i,int killed) {
         int nread;
         int rc;
         char buffer[4096];
         int &fd = this->rpipefd[i];
-        ioctl(fd, FIONREAD, &nread);
-        std::string msg_content;
-        int msg_type;
-        bool s_writeable = this->is_sessions_writeable();
-        if (nread == 0) {
-            close(fd);
-            close(this->logfile_fd[i]);
-            logger->debug("pid:%d pipe fd %d closed\n",
-                          this->backup_pid, fd);
-            fd = -1;
-            this->logfile_fd[i] = -1;
-            msg_type = 0;
-            msg_content += "\n";
-            msg_content = log_proc_exit_status(this, pid, last_wstatus);
-            msg_content += "\n";
-            s_writeable = true;
-        } else {
-            msg_type = 1;
-            int remaining_bytes = nread;
-            do {
-                int max_nread;
+        do {
+            ioctl(fd, FIONREAD, &nread);
+            if (nread == 0) {
+                close(fd);
+                close(this->logfile_fd[i]);
+                logger->debug("pid:%d pipe fd %d closed\n",
+                              this->backup_pid, fd);
+                fd = -1;
+                this->logfile_fd[i] = -1;
+                break;
+            } else {
+                std::string msg_content;
+                int msg_type = 1;
+                bool s_writeable = killed || this->is_sessions_writeable();
                 if (!s_writeable) {
                     break;
                 }
-                max_nread = std::min(remaining_bytes, (int) sizeof(buffer));
-                assert(max_nread <= sizeof(buffer));
-                rc = (int) pm_tiny::safe_read(fd, buffer, max_nread);
-                if (rc > 0) {
-                    std::string output_text(buffer, rc);
-                    auto pure_text = remove_ANSI_escape_code(output_text);
-                    redirect_output_log(i, pure_text);
+                int remaining_bytes = nread;
+                do {
+                    int max_nread;
+                    max_nread = std::min(remaining_bytes, (int) sizeof(buffer));
+                    assert(max_nread <= sizeof(buffer));
+                    rc = (int) pm_tiny::safe_read(fd, buffer, max_nread);
+                    if (rc > 0) {
+                        std::string output_text(buffer, rc);
+                        auto pure_text = remove_ANSI_escape_code(output_text);
+                        redirect_output_log(i, pure_text);
 #if PM_TINY_PTY_ENABLE
-                    msg_content += output_text;
+                        msg_content += output_text;
 #endif
-                    remaining_bytes -= rc;
-                } else if ((rc == -1 && errno != EINTR)) {
-                    logger->syscall_errorlog("name:%s pid:%d fdin:%d fdout:%d read",
-                                             this->name.c_str(), this->pid, fd, this->logfile_fd[i]);
-                    break;
-                }
-            } while (remaining_bytes > 0);
-        }
+                        remaining_bytes -= rc;
+                    } else if ((rc == -1 && errno != EINTR)) {
+                        logger->syscall_errorlog("name:%s pid:%d fdin:%d fdout:%d read",
+                                                 this->name.c_str(), this->pid, fd, this->logfile_fd[i]);
+                        break;
+                    }
+                } while (remaining_bytes > 0);
 
 #if PM_TINY_PTY_ENABLE
-        if (s_writeable) {
-            this->write_msg_to_sessions(msg_type, msg_content);
-        }
+                    this->write_msg_to_sessions(msg_type, msg_content);
 #endif
+            }
+        } while (killed);
     }
 
     void prog_info_t::write_cache_log_to_session(session_t *session) {
@@ -275,5 +281,36 @@ namespace pm_tiny {
                      pid, prog_name, buf, run_time, restart_count);
         }
         return s_buff;
+    }
+
+    bool prog_info_t::is_kill_timeout() {
+        return (pm_tiny::time::gettime_monotonic_ms() - request_stop_timepoint) >= kill_timeout_sec * 1000;;
+    }
+
+    void prog_info_t::async_force_kill() {
+        assert(this->pid != -1);
+        int rc = kill(this->pid, SIGKILL);
+        if (rc != 0) {
+            PM_TINY_LOG_E_SYS("kill");
+        }
+    }
+
+    void prog_info_t::execute_penddingtasks(pm_tiny_server_t& pm_tiny_server) {
+        if(!kill_pendingtasks.empty()) {
+            for (auto &t: kill_pendingtasks) {
+                t(pm_tiny_server);
+            }
+            kill_pendingtasks.clear();
+        }
+    }
+    void prog_info_t::async_kill_prog() {
+        assert(this->pid != -1);
+        this->state = PM_TINY_PROG_STATE_REQUEST_STOP;
+        this->request_stop_timepoint = pm_tiny::time::gettime_monotonic_ms();
+        int rc = kill(this->pid, SIGTERM);
+        if (rc == -1) {
+            PM_TINY_LOG_E_SYS("kill");
+        }
+        alarm(this->kill_timeout_sec);
     }
 }

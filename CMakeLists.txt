@@ -4,7 +4,7 @@ project(pm_tiny)
 set(CMAKE_CXX_STANDARD 14)
 
 add_definitions(
-        -DPM_TINY_VERSION="1.0.1"
+        -DPM_TINY_VERSION="1.0.2"
 )
 
 add_executable(pm_tiny src/pm_tiny.cpp src/pm_tiny_server.cpp
@@ -36,3 +36,10 @@ add_executable(pm src/pm.cpp src/session.cpp
 add_executable(string_utils_test
         test/string_utils_test.cpp
         src/string_utils.cpp)
+
+add_executable(forcekill_test test/forcekill_test.cpp)
+add_executable(normal_exit_test test/normal_exit_test.cpp)
+add_executable(abnorm_exit_test test/abnorm_exit_test.cpp)
+add_executable(runforever_test test/runforever_test.cpp)
+add_executable(abort_test test/abort_test.cpp)
+add_executable(close_stdout_test test/close_stdout_test.cpp)

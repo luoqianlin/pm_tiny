@@ -59,6 +59,10 @@ namespace pm_tiny {
         proglist_t pm_tiny_progs;
         int server_exit = 0;
 
+        std::vector<pm_tiny::session_ptr_t> sessions;
+
+
+
         int parse_cfg();
 
         void parse_app_environ(const std::string &name,

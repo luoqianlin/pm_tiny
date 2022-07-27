@@ -64,7 +64,7 @@ std::string pm_state_to_str(int state) {
         case PM_TINY_PROG_STATE_STARTUP_FAIL:
             return "startfail";
         case PM_TINY_PROG_STATE_REQUEST_STOP:
-            return "stop";
+            return "stoping";
         case PM_TINY_PROG_STATE_STOPED:
             return "stoped";
         case PM_TINY_PROG_STATE_EXIT:
@@ -405,13 +405,20 @@ void loop_read_show_process_log(pm_tiny::session_t &session) {
                 exit(EXIT_FAILURE);
             }
         }
-        auto rf = session.read_frame();
-        if (!rf)continue;
-        pm_tiny::iframe_stream ifs(*rf);
-        ifs >> msg_type;
-        ifs >> msg_content;
-        printf("%s", msg_content.c_str());
-        fflush(stdout);
+        session.read();
+        msg_type = 1;
+        while (true) {
+            auto rf = session.get_frame_from_buf();
+            if (!rf)break;
+            pm_tiny::iframe_stream ifs(*rf);
+            ifs >> msg_type;
+            ifs >> msg_content;
+            printf("%s", msg_content.c_str());
+            fflush(stdout);
+            if (msg_type == 0) {
+                break;
+            }
+        }
         if (msg_type == 0) {
             break;
         }

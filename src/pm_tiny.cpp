@@ -2,6 +2,7 @@
 #include "log.h"
 #include "time_util.h"
 #include "prog.h"
+#include "assert.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
@@ -30,6 +31,8 @@ handle_cmd_start(pm_tiny_server_t &pm_tiny_server, pm_tiny::iframe_stream &ifs,
                  std::shared_ptr<pm_tiny::session_t> &session);
 
 void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions);
+
+std::string msg_cmd_not_completed(const std::string &name);
 
 static sig_atomic_t exit_signal = 0;
 static sig_atomic_t alarm_signal = 0;
@@ -269,6 +272,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
     sig_atomic_t save_exit_chld_signal = exit_chld_signal;
     exit_chld_signal = 0;
     if (save_exit_chld_signal) {
+        proglist_t penddingtask_progs;
         size_t wait_proc_num = get_current_alive_prog(pm_tiny_progs);
         while (wait_proc_num > 0) {
             rc = wait_any_nohang(&wstatus);
@@ -290,9 +294,11 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                         p->dead_count_timer++;
                     }
                     p->close_fds();
-                    bool normal_exit = ((WIFSIGNALED(wstatus) && (WTERMSIG(wstatus) == p->pendding_signal))
-                                        || (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0));
-                    p->pendding_signal = 0;
+                    if(p->state==PM_TINY_PROG_STATE_REQUEST_STOP) {
+                        penddingtask_progs.push_back(p);
+                    }
+                    bool normal_exit = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0)
+                                       || p->state == PM_TINY_PROG_STATE_REQUEST_STOP;
                     if (!normal_exit) {
                         if ((p->dead_count_timer < p->moniter_duration_max_dead_count ||
                              p->moniter_duration_max_dead_count <= 0) &&
@@ -316,7 +322,11 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                             p->set_state(PM_TINY_PROG_STATE_STOPED);
                         }
                     } else {
-                        p->set_state(PM_TINY_PROG_STATE_EXIT);
+                        if (p->state == PM_TINY_PROG_STATE_REQUEST_STOP) {
+                            p->set_state(PM_TINY_PROG_STATE_STOPED);
+                        } else {
+                            p->set_state(PM_TINY_PROG_STATE_EXIT);
+                        }
                     }
                 } else {
                     std::string exit_info = pm_tiny::prog_info_t::log_proc_exit_status(nullptr, rc, wstatus);
@@ -334,6 +344,9 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                 }
                 break;
             }
+        }
+        for (auto &p: penddingtask_progs) {
+            p->execute_penddingtasks(tiny_server);
         }
     }
 }
@@ -377,7 +390,13 @@ void install_hup_handler() {
     act.sa_sigaction = sig_hup_handler;
     sigaction(SIGHUP, &act, nullptr);
 }
-
+void install_alarm_handler() {
+    struct sigaction act;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = SA_SIGINFO;
+    act.sa_sigaction = sig_alarm_handler;
+    sigaction(SIGALRM, &act, nullptr);
+}
 int open_uds_listen_fd(const std::string& sock_path) {
     int sfd;
     struct sockaddr_un my_addr;
@@ -433,9 +452,10 @@ void start(pm_tiny_server_t &pm_tiny_server) {
     install_exit_handler();
     install_chld_handler();
     install_hup_handler();
+    install_alarm_handler();
     pm_tiny_server.spawn();
     proglist_t &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
-    std::vector<pm_tiny::session_ptr_t> sessions;
+    std::vector<pm_tiny::session_ptr_t>& sessions=pm_tiny_server.sessions;
     using pm_tiny::operator<<;
     sigset_t smask, empty_mask,osigmask;
     sigemptyset(&smask);
@@ -457,6 +477,14 @@ void start(pm_tiny_server_t &pm_tiny_server) {
             exit(EXIT_FAILURE);
         }
         check_delayed_sigs(pm_tiny_server);
+        for (auto &prog: pm_tiny_progs) {
+            if (prog->state == PM_TINY_PROG_STATE_REQUEST_STOP) {
+                if (prog->pid != -1 && prog->is_kill_timeout()) {
+                    prog->async_force_kill();
+                }
+            }
+        }
+
         FD_ZERO(&rfds);
         FD_ZERO(&wfds);
         int max_fd = -1;
@@ -483,7 +511,7 @@ void start(pm_tiny_server_t &pm_tiny_server) {
 
                               f_fd2rfds(session->get_fd());
                               if (session->sbuf_size() > 0) {
-                                  printf("%d sbuf_size:%d\n", session->get_fd(), session->sbuf_size());
+//                                  printf("%d sbuf_size:%d\n", session->get_fd(), session->sbuf_size());
                                   f_fd2wfds(session->get_fd());
                               }
                           });
@@ -566,21 +594,43 @@ void check_sock_has_event(int total_ready_fd,
                                              [&name](const prog_ptr_t &prog) {
                                                  return prog->name == name;
                                              });
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
+
                     if (iter == pm_tiny_progs.end()) {
+                        auto wf = std::make_shared<pm_tiny::frame_t>();
                         pm_tiny::fappend_value<int>(*wf, 0x1);
                         pm_tiny::fappend_value(*wf, "not found `" + name + "`");
+                        session->write_frame(wf);
                     } else {
-                        if ((*iter)->pid != -1) {
-                            kill_prog(*iter);
-                            pm_tiny::fappend_value<int>(*wf, 0);
-                            pm_tiny::fappend_value(*wf, "success");
+                        auto prog_=*iter;
+                        if (!prog_->kill_pendingtasks.empty()) {
+                            auto wf = std::make_shared<pm_tiny::frame_t>();
+                            pm_tiny::fappend_value<int>(*wf, -0x3);
+                            std::string msg = msg_cmd_not_completed(name);
+                            pm_tiny::fappend_value(*wf, msg);
+                            session->write_frame(wf);
                         } else {
-                            pm_tiny::fappend_value<int>(*wf, 2);
-                            pm_tiny::fappend_value(*wf, "`" + name + "` not running");
+                            if (prog_->pid != -1) {
+                                auto stop_proc_task = [session](pm_tiny_server_t &pm_tiny_server) {
+                                    if (session->is_close()) {
+                                        return;
+                                    }
+                                    auto wf = std::make_shared<pm_tiny::frame_t>();
+                                    pm_tiny::fappend_value<int>(*wf, 0);
+                                    pm_tiny::fappend_value(*wf, "success");
+                                    session->write_frame(wf);
+                                };
+                                prog_->async_kill_prog();
+                                prog_->kill_pendingtasks.emplace_back(stop_proc_task);
+
+                            } else {
+                                auto wf = std::make_shared<pm_tiny::frame_t>();
+                                pm_tiny::fappend_value<int>(*wf, 2);
+                                pm_tiny::fappend_value(*wf, "`" + name + "` not running");
+                                session->write_frame(wf);
+                            }
                         }
                     }
-                    session->write_frame(wf);
+
                 } else if (f_type == 0x25) {//start
                     std::shared_ptr<pm_tiny::frame_t> wf = handle_cmd_start(pm_tiny_server, ifs,session);
                     session->write_frame(wf);
@@ -602,19 +652,41 @@ void check_sock_has_event(int total_ready_fd,
                                              [&name](const prog_ptr_t &prog) {
                                                  return prog->name == name;
                                              });
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
+
                     if (iter == pm_tiny_progs.end()) {
+                        auto wf = std::make_shared<pm_tiny::frame_t>();
                         pm_tiny::fappend_value<int>(*wf, 0x1);
                         pm_tiny::fappend_value(*wf, "not found `" + name + "`");
+                        session->write_frame(wf);
                     } else {
-                        if ((*iter)->pid != -1) {
-                            kill_prog(*iter);
+                        auto prog_ = *iter;
+                        if (!prog_->kill_pendingtasks.empty()) {
+                            auto wf = std::make_shared<pm_tiny::frame_t>();
+                            pm_tiny::fappend_value<int>(*wf, -0x3);
+                            std::string msg = msg_cmd_not_completed(name);
+                            pm_tiny::fappend_value(*wf, msg);
+                            session->write_frame(wf);
+                        } else {
+                            auto delete_prog_task = [session, prog_](pm_tiny_server_t &pm_tiny_server) {
+                                if (session->is_close()) {
+                                    return;
+                                }
+                                auto wf = std::make_shared<pm_tiny::frame_t>();
+                                pm_tiny_server.pm_tiny_progs.remove(prog_);
+                                pm_tiny::fappend_value<int>(*wf, 0);
+                                pm_tiny::fappend_value(*wf, "success");
+                                session->write_frame(wf);
+                            };
+
+                            if (prog_->pid != -1) {
+                                prog_->async_kill_prog();
+                                prog_->kill_pendingtasks.emplace_back(delete_prog_task);
+                            } else {
+                                delete_prog_task(pm_tiny_server);
+                            }
                         }
-                        pm_tiny_progs.erase(iter);
-                        pm_tiny::fappend_value<int>(*wf, 0);
-                        pm_tiny::fappend_value(*wf, "success");
                     }
-                    session->write_frame(wf);
+
                 } else if (f_type == 0x28) {//restart
                     std::string name;
                     ifs >> name;
@@ -622,33 +694,50 @@ void check_sock_has_event(int total_ready_fd,
                                              [&name](const prog_ptr_t &prog) {
                                                  return prog->name == name;
                                              });
-                    auto wf = std::make_shared<pm_tiny::frame_t>();
                     if (iter == pm_tiny_progs.end()) {
-                        pm_tiny::fappend_value<int>(*wf, 0x1);
+                        auto wf = std::make_shared<pm_tiny::frame_t>();
+                        pm_tiny::fappend_value<int>(*wf, -0x1);
                         pm_tiny::fappend_value(*wf, "not found `" + name + "`");
+                        session->write_frame(wf);
                     } else {
-                        bool is_alive = (*iter)->pid != -1;
-//                        pm_tiny::time::CElapsedTimer elapsedTimer;
-                        if (is_alive) {
-                            kill_prog(*iter);
-//                            PM_TINY_LOG_I("kill %s cost:%dms", (*iter)->name.c_str(),elapsedTimer.ms());
-                        }
-                        if (is_alive) {
-                            (*iter)->dead_count++;
-                        }
-                        int rc = pm_tiny_server.start_prog(*iter);
-                        if (rc == -1) {
-                            std::string errmsg(strerror(errno));
-                            pm_tiny::fappend_value<int>(*wf, 1);
-                            pm_tiny::fappend_value(*wf, errmsg);
+                        auto prog_=*iter;
+                        if (!prog_->kill_pendingtasks.empty()) {
+                            auto wf = std::make_shared<pm_tiny::frame_t>();
+                            pm_tiny::fappend_value<int>(*wf, -0x3);
+                            std::string msg = msg_cmd_not_completed(name);
+                            pm_tiny::fappend_value(*wf, msg);
+                            session->write_frame(wf);
                         } else {
-                            pm_tiny::fappend_value<int>(*wf, 0);
-                            pm_tiny::fappend_value(*wf, "success");
+                            bool is_alive = prog_->pid != -1;
+                            auto start_prog_task = [session, prog_](pm_tiny_server_t
+                                                                    &pm_tiny_server) {
+                                if (session->is_close()) {
+                                    return;
+                                }
+                                auto wf = std::make_shared<pm_tiny::frame_t>();
+                                assert(prog_->state != PM_TINY_PROG_STATE_RUNING);
+                                int rc = pm_tiny_server.start_prog(prog_);
+                                if (rc == -1) {
+                                    std::string errmsg(strerror(errno));
+                                    pm_tiny::fappend_value<int>(*wf, 1);
+                                    pm_tiny::fappend_value(*wf, errmsg);
+                                } else {
+                                    prog_->dead_count++;
+                                    pm_tiny::fappend_value<int>(*wf, 0);
+                                    pm_tiny::fappend_value(*wf, "success");
+                                }
+                                session->write_frame(wf);
+                            };
+
+                            if (is_alive) {
+                                prog_->async_kill_prog();
+                                prog_->kill_pendingtasks.emplace_back(start_prog_task);
+                            } else {
+                                start_prog_task(pm_tiny_server);
+                            }
                         }
-//                        PM_TINY_LOG_I("restart %s cost:%dms", (*iter)->name.c_str(),elapsedTimer.ms());
                     }
-                    session->write_frame(wf);
-                }else if(f_type==0x29){
+                }else if(f_type==0x29){//version
                     auto wf = std::make_shared<pm_tiny::frame_t>();
                     pm_tiny::fappend_value(*wf, PM_TINY_VERSION);
                     session->write_frame(wf);
@@ -705,6 +794,13 @@ void check_sock_has_event(int total_ready_fd,
 //    if (closed_session) {
 //        remove_closed_session(sessions);
 //    }
+}
+
+std::string msg_cmd_not_completed(const std::string &name) {
+    std::string msg = "On target `";
+    msg += name;
+    msg += "`, another operation is not completed, try later.";
+    return msg;
 }
 
 void remove_closed_session(std::vector<pm_tiny::session_ptr_t> &sessions) {
