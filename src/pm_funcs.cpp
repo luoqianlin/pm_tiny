@@ -261,6 +261,7 @@ namespace pm_funcs {
         pm_tiny::fappend_value(*f, static_cast<pm_tiny::failure_action_underlying_t>(prog_cfg.failure_action));
         pm_tiny::fappend_value(*f, prog_cfg.daemon);
         pm_tiny::fappend_value(*f, prog_cfg.heartbeat_timeout);
+        pm_tiny::fappend_value(*f, prog_cfg.oom_score_adj);
         pm_tiny::fappend_value(*f, static_cast<int>(prog_cfg.env_vars.size()));
         std::for_each(prog_cfg.env_vars.begin(), prog_cfg.env_vars.end(),
                       [&](const auto &env_var) {
@@ -489,6 +490,7 @@ namespace pm_funcs {
         ifs >> heartbeat_timeout;
         ifs >> kill_timeout_sec;
         ifs >> run_as;
+        ifs >> oom_score_adj;
     }
 
     void progcfg_t::show() {
@@ -527,6 +529,9 @@ namespace pm_funcs {
         }
         prog_table.add_row({"heartbeat_timeout", heartbeat_timeout_ss});
         prog_table.add_row({"kill_timeout", std::to_string(kill_timeout_sec) + "s"});
+#ifdef __ANDROID__
+        prog_table.add_row({"oom_score_adj", std::to_string(oom_score_adj)});
+#endif
         std::cout << prog_table << std::endl;
     }
 }

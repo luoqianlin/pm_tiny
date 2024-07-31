@@ -27,6 +27,7 @@ namespace pm_tiny {
         bool daemon = true;
         int heartbeat_timeout = -1;//The unit is second, its value <=0 means disable
         std::vector<std::string> env_vars;
+        int oom_score_adj = 0;
     };
     using prog_cfg_graph_t = Graph<prog_cfg_t *>;
 

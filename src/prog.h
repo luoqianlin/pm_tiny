@@ -45,6 +45,7 @@
 #include "pm_tiny_enum.h"
 #include <unordered_map>
 #include <unordered_set>
+#include "pm_tiny_utility.h"
 namespace pm_tiny {
     class session_t;
     class pm_tiny_server_t;
@@ -80,6 +81,7 @@ namespace pm_tiny {
         int kill_timeout_sec = 3;//3s
         std::string run_as;
         std::vector<std::string> env_vars;
+        int oom_score_adj;
 
         const int MAX_CACHE_LOG_LEN = 4096;//4kb
         std::vector<char> cache_log;
@@ -109,7 +111,7 @@ namespace pm_tiny {
          * 监管的程序运行结束后会关闭pipefd,
          * select会监听到pipefd关闭进而关闭pipfd和对应的日志文件fd
          * */
-        void close_fds();
+        void close_fds(const CloseableFd& lmkd);
 
         void write_prog_exit_message();
 
