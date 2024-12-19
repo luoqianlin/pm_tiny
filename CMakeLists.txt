@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
-project(pm_tiny VERSION 1.1.3 LANGUAGES C CXX)
+project(pm_tiny VERSION 1.1.4 LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 

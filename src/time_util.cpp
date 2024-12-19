@@ -51,8 +51,9 @@ namespace pm_tiny {
             struct timespec ts{};
             if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1) {
                 perror("clock_gettime");
+                return -1;
             }
-            return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
         }
 
         char *strftime_fmt(char *buf, unsigned len, time_t *tp, const char *fmt) {
