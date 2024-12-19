@@ -51,6 +51,8 @@ namespace mgr {
 
         std::tuple<std::string,std::string>splitext(const std::string&file);
 
+        std::pair<std::string, std::string> remove_ANSI_escape_code(const std::string &text);
+
         template<typename Out>
         void split(const std::string &s, const std::vector<char> &delims, Out result) {
             int i, prev_index = 0;

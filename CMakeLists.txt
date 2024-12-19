@@ -26,7 +26,8 @@ message(STATUS "PM_TINY_SANITIZER_ENABLE:${PM_TINY_SANITIZER_ENABLE}")
 include(FetchContent)
 
 FetchContent_Declare(yaml-cpp
-        URL https://files.sansi.net/libs/yaml-cpp-yaml-cpp-0.7.0.tar.gz
+        GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+        GIT_TAG yaml-cpp-0.7.0
         DOWNLOAD_DIR ${CMAKE_HOME_DIRECTORY}/dependencies
 )
 FetchContent_MakeAvailable(yaml-cpp)
