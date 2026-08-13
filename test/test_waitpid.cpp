@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-13.
-//
 #include <unistd.h>
 #include <wait.h>
 #include <stdio.h>

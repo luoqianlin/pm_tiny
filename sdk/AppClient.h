@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-11.
-//
 
 #ifndef PM_TINY_APPCLIENT_H
 #define PM_TINY_APPCLIENT_H

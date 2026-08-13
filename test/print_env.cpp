@@ -1,6 +1,3 @@
-//
-// Created by luo on 2021/10/15.
-//
 #include <stdio.h>
 #include <unistd.h>
 

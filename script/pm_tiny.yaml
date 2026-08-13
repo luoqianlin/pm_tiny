@@ -5,3 +5,5 @@ pm_tiny_prog_cfg_file: /usr/local/pm_tiny/prog.yaml
 pm_tiny_app_log_dir: /var/log/pm_tiny/logs
 pm_tiny_app_environ_dir: /usr/local/pm_tiny/environ
 pm_tiny_uds_abstract_namespace: false
+pm_tiny_process_tree_mode: auto
+# pm_tiny_cgroup_root: /sys/fs/cgroup

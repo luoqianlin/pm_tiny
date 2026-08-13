@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 2022/7/1.
-//
 #include <stdio.h>
 
 int main(void)

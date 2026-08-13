@@ -1,8 +1,5 @@
-//
-// Created by qianlinluo@foxmail.com on 2022/7/26.
-//
 
-#include "../src/string_utils.h"
+#include "core/string_utils.h"
 #include <iostream>
 #include <assert.h>
 
@@ -53,13 +50,15 @@ void test_utf8_bytes_boundry() {
     std::string text2 = "\xe4\xb8\x8a\xe6\xb5\xb7\xe4\xb8\x8a\xe6\xb5\xb7";
     assert(text == text2);
     printf("len:%zu\n", text2.length());
-    for (int i = 0; i < text.length(); i++) {
+    for (std::string::size_type i = 0; i < text.length(); i++) {
         printf("%02x ", (unsigned char) text[i]);
     }
     printf("\n");
 }
 
 int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
     using namespace std::string_literals;
     std::string s = "a\0bc"s;
     s = "aaa" "bbb" "cc";

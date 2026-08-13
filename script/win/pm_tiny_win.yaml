@@ -1,0 +1,18 @@
+- name: demo_env
+  command: cmd.exe /c "echo VALUE=%TEST_FROM_PM% & timeout /t 2 >nul"
+  cwd: .
+  daemon: false
+  restart_delay_ms: 0
+  env_vars:
+    - TEST_FROM_PM=from_config
+    - MIXED_Key=UpperCase
+  log_dir: logs
+  log_file_name: demo_env.log
+
+- name: demo_ping
+  command: cmd.exe /c ping 127.0.0.1 -t
+  cwd: .
+  daemon: true
+  restart_delay_ms: 2000
+  log_dir: logs
+  log_file_name: demo_ping.log

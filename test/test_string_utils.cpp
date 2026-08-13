@@ -1,11 +1,10 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-3.
-//
-#include "../src/string_utils.h"
+#include "core/string_utils.h"
 #include <cassert>
 #include <iostream>
 
 int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
     std::string filename = "a.txt";
     std::string name, ext;
     std::tie(name, ext) = mgr::utils::splitext(filename);

@@ -1,267 +1,124 @@
-![](images/shot.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/pm-tiny-logo-dark.svg">
+  <img src="images/pm-tiny-logo.svg" alt="PM_Tiny" width="640">
+</picture>
+
 # PM_Tiny
 
 简体中文 | [English](README_en.md)
 
-## PM_Tiny进程管理工具
+PM_Tiny 是面向嵌入式设备与边缘节点的轻量级跨平台进程监督器，用于可靠地启动、监控、停止和恢复一组存在依赖关系的本地应用。
 
-PM_Tiny(process manager tiny)是Linux环境下进程管理工具。
-能够按照设置的依赖关系启动程序，在进程异常退出时重新启动应用程序，保障服务的可用性。
-pm_tiny同时会将应用程序的输出内容重定向到日志文件中，日志文件实现循环覆盖，确保不会因为输出日志太多消耗完存储空间。
+它由守护进程 `pm_tiny` 和命令行客户端组成：Linux/Windows 使用 `pm`，Android 使用 `pm2`，避免与系统自带的 `/system/bin/pm` 包管理器冲突。
 
-**编译后可执行文件极小(总大小不超过1MB),非常适合嵌入式Linux运行。**
+## 核心能力
 
-### 编译
+- **依赖编排**：校验 DAG，按稳定拓扑顺序启动，依赖失败时标记下游为 `blocked`，恢复后自动继续。
+- **自动恢复**：支持异常重启、指数退避、时间窗口限流、ready/tick 心跳及启动/心跳超时。
+- **完整进程树终止**：Linux/Android 使用 cgroup v2 并可降级到进程组；Windows 使用 Job Object。
+- **本地安全通信**：Linux/Android 使用 Unix Domain Socket，Windows 使用 named pipe，均承载二进制协议 v2。
+- **可观测 CLI**：提供自适应列表、JSON 状态、依赖图、进程详情、日志流和明确的连接错误诊断。
+- **离线可部署**：C++14/CMake 工程，第三方依赖随源码固定，可用于无外网的设备构建环境。
 
-代码使用c++实现(编译器需支持C++14)。
+## 架构
 
-项目使用cmake构建，请确保系统已安装cmake。
-
-#### Ubuntu编译安装
-```shell
-$ make build #编译
-$ make install_ubuntu #安装
-$ systemctl start pm_tiny #启动
+```mermaid
+flowchart LR
+    CLI[pm / Android pm2] -->|本地 IPC v2| Daemon[pm_tiny]
+    Daemon --> DAG[依赖图与启动状态机]
+    Daemon --> Runtime[进程监控与自动恢复]
+    Runtime --> Apps[受管理应用及其子进程]
+    Apps -->|ready / tick| Daemon
 ```
 
-#### Linux通用平台编译
+`pm_tiny` 持有配置、依赖图和运行状态；CLI 只通过本机 IPC 查询状态或发送控制命令。核心不开放 HTTP 端口，也不承担容器编排或完整 init 职责。
 
-```shell
-$ mkdir build && cd build
-$ cmake ..
-$ cmake --build . --target pm_tiny --target pm --target pm_sdk
-$ cmake --install .
+## 快速体验（Linux）
+
+```bash
+git clone <repository-url> pm_tiny
+cd pm_tiny
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target pm_tiny pm
+
+./build/pm_tiny &
+./build/pm start "/usr/bin/sleep 300" --name demo --no_daemon --no_pty
+./build/pm list
+./build/pm graph
+./build/pm stop demo
+./build/pm delete demo
+./build/pm quit
 ```
 
-#### Hi3559A V100 平台编译
+默认运行目录为 `~/.pm_tiny`，进程配置为 `~/.pm_tiny/prog.yaml`。生产环境可执行 `sudo make install_ubuntu` 安装 systemd 服务。
 
-已安装相应的SDK,交叉编译工具链应该位于目录`/opt/hisi-linux/x86-arm`
-```shell
-$ mkdir hisi_build && cd hisi_build
-$ cmake -DCMAKE_TOOLCHAIN_FILE=../toolchains/himix100.toolchain.cmake ..
-$ cmake --build . --target pm_tiny --target pm --target pm_sdk
-$ cmake --install .
-```
-#### AX620A平台编译
+## 平台支持
 
-已安装相应交叉编译工具链,将命令`arm-linux-gnueabihf-gcc`、`arm-linux-gnueabihf-g++`配置到环境变量
-```shell
-BUILD_DIR=".ax_build"
-rm -rf ${BUILD_DIR}
-mkdir ${BUILD_DIR} && cd ${BUILD_DIR}
-cmake -DCMAKE_TOOLCHAIN_FILE=../toolchains/ax620a.toolchain.cmake ..
-cmake --build . --target pm_tiny --target pm --target pm_sdk
-cmake --install .
-```
+| 平台 | 状态 | CLI | 进程树后端 | 构建/部署入口 |
+| --- | --- | --- | --- | --- |
+| Linux | 稳定 | `pm` | cgroup v2 / process group | `make build` 或 CMake |
+| Android | 支持 | `pm2` | cgroup v2 / process group | Android NDK CMake；安装产物为 `bin/pm2` |
+| Windows | 开发中但可用 | `pm.exe` | Job Object | VS 2022 MSVC；参见 [Windows 状态](docs/windows_port_status.md) |
+| Hi3559A / AX620A | 交叉编译支持 | `pm` | 平台 Linux 能力 | [`toolchains/`](toolchains) |
 
-### 安装
-> Ubuntu环境参照[Ubuntu编译安装](#ubuntu编译安装)说明，无需进行此步骤
+Android 的 CMake target 仍名为 `pm`，因此使用 `cmake --build <dir> --target pm` 构建，但生成和安装的设备端文件名为 `pm2`。这里的名称仅用于避开 Android 系统命令，与 Node.js 的 PM2 项目无关。
 
-拷贝编译产物`build/pm_tiny`,`build/pm`到环境变量路径 ，运行pm_tiny服务(正式环境中应配置pm_tiny为开机自启动)：
-```shell
-$ pm_tiny -d #-d参数指定以daemon方式运行
-```
+## 常用命令
 
-### 使用
+| 命令 | 说明 |
+| --- | --- |
+| `pm list [--wide\|--json] [--no-color]` | 查看运行状态；Android 将 `pm` 替换为 `pm2`。 |
+| `pm graph [name] [--json\|--dot]` | 查看完整依赖图或指定节点的上下游子图。 |
+| `pm start <command> --name <name> [options]` | Linux/Android 动态增加并启动进程。 |
+| `pm start <name>` | 启动已配置进程及其依赖闭包。 |
+| `pm stop\|restart\|delete <name>` | 停止、重启或删除进程。 |
+| `pm log\|inspect <name>` | 查看实时日志或进程配置与运行信息。 |
+| `pm save` / `pm reload` | 持久化当前配置或重新加载配置文件。 |
+| `pm quit` / `pm version` | 退出守护进程或查看版本。 |
 
-就将程序交给pm_tiny管理:
+完整参数以 `pm --help`（Android 为 `pm2 --help`）为准。`list --json` 和 `graph --json` 提供适合自动化脚本使用的稳定结构化输出。
 
-1、添加程序
-
-```shell
-$ pm start "node test.js arg0 arg1" --name app_name #运行app.js并取名为app_name,名称用于后面管理使用，不能重复
-Success
-Total:1
- ------------------------------------------------------------------------------------------
-| pid   | name     | cwd                      | command                 | restart | state  |
- ------------------------------------------------------------------------------------------
-| 21864 | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | online |
- ------------------------------------------------------------------------------------------
-
-```
-
-可用选项:
-
-`--kill_timeout <seconds>` 停止应用时的超时时间，单位秒，默认值为3；`pm stop`命令执行时，PM_Tiny会首先向应用发送`SIGTERM`信号，如果超过该时间应用还存在将向其发送`SIGKILL`信号。
-
-`--user <user>` 应用程序运行时的用户名，默认为空，空表示与运行PM_Tiny服务的用户一样。
-
-`--depends_on <other_apps>` 依赖的应用程序，必须等依赖的程序启动后，该程序才会启动。不同程序名称使用`,`分隔。
-
-`--start_timeout <seconds>` 应用启动超时时间，单位秒，默认值0；如果为-1表示必须接收到应用程序的ready消息后才会标记为在线状态； 如果大于零，在该值范围内收到应用程序ready消息，则标记为在线，否则将执行`failure_action`指定的动作。
-
-`--failure_action <skip|restart|reboot>`   启动超时和心跳超时执行的动作，其值可以为`skip`、`restart`、`reboot`，默认值为`skip`； 当`start_timeout`>0时使用`skip`可以实现应用启动延时`start_timeout`秒后将其标记为在线；`restart`表示重启应用；`reboot`表示重启系统。
-
-`--heartbeat_timeout <seconds>` 单位秒，默认值-1；小于等于0表示不开启应用程序到PM_Tiny的心跳监测；大于0时，在该时间内如果未收到应用程序的心跳将执行`failure_action`指定的动作。
-
-`--no_daemon` 带有该选项表示不以`daemon`运行，程序退出后不会重启
-
-`--log` 表示运行程序并显示其输出信息
-
-
-2、查看程序
-
-```shell
-$ pm ls 
-Total:1
- ------------------------------------------------------------------------------------------
-| pid   | name     | cwd                      | command                 | restart | state  |
- ------------------------------------------------------------------------------------------
-| 21864 | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | online |
- ------------------------------------------------------------------------------------------
-
-```
-
-3、停止程序
-
-```shell
-$ pm stop app_name
-Success
-Total:1
- ----------------------------------------------------------------------------------------
-| pid | name     | cwd                      | command                 | restart | state  |
- ----------------------------------------------------------------------------------------
-| -1  | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | stoped |
- ----------------------------------------------------------------------------------------
-
-```
-
-4、运行程序
-
-```shell
-$ pm start app_name
-Success
-Total:1
- ------------------------------------------------------------------------------------------
-| pid   | name     | cwd                      | command                 | restart | state  |
- ------------------------------------------------------------------------------------------
-| 22047 | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | online |
- ------------------------------------------------------------------------------------------
-
-```
-
-可以选择添加`--log`选项,表示运行程序并显示其输出信息
-
-5、查看程序输出
-
-```shell
-$ pm log app_name
-```
-
-6、查看程序配置
-
-```shell
-$ pm inspect app_name
-+-------------------+----------------------------------+
-| name              | app_name                         |
-+-------------------+----------------------------------+
-| cwd               | /home/xx/pm_tiny/default         |
-+-------------------+----------------------------------+
-| command           |  node test.js arg0 arg1          |  
-+-------------------+----------------------------------+
-| user              | root                             |
-+-------------------+----------------------------------+
-| daemon            | Y                                |
-+-------------------+----------------------------------+
-| depends_on        |                                  |
-+-------------------+----------------------------------+
-| start_timeout     | available immediately            |
-+-------------------+----------------------------------+
-| failure_action    | skip                             |
-+-------------------+----------------------------------+
-| heartbeat_timeout | disable                          |
-+-------------------+----------------------------------+
-| kill_timeout      | 3s                               |
-+-------------------+----------------------------------+
-```
-
-
-7、删除程序
-
-```shell
-$ pm delete app_name
-Success
-Total:0
- ----------------------------------------------
-| pid | name | cwd | command | restart | state |
- ----------------------------------------------
-```
-
-8、持久化启动配置，pm_tiny服务启动后运行在配置中的程序(配置默认保存在`~/.pm_tiny/prog.cfg`文件中)
-
-```shell
-$ pm save
-Success
-```
-
-### 配置
-
-pm_tiny默认家目录(PM_TINY_HOME)为`~/.pm_tiny`,也可以通过修改环境变量`PM_TINY_HOME`指定家目录。
-
-应用程序的输出日志默认在`${PM_TINY_HOME}/logs`目录下
-
-配置文件位于`${PM_TINY_HOME}/prog.yaml`
-
-一个配置文件例子：
+## 最小依赖配置
 
 ```yaml
-- name: hardware_service
-  cwd: /opt/hardware
-  command: ./hardware_server
-  kill_timeout_s: 3
-  user: ""
-  depends_on:
-    []
-  start_timeout: 2
-  failure_action: skip
+- name: database
+  cwd: /opt/app
+  command: ./database
   daemon: true
-  heartbeat_timeout: -1
+  pty: false
 
-- name: ai_service
-  cwd: /opt/algo
-  command: ./ai_server
-  kill_timeout_s: 10
-  user: ""
-  depends_on:
-   - hardware_service
-  start_timeout: 5
-  failure_action: skip
+- name: api
+  cwd: /opt/app
+  command: ./api
   daemon: true
-  heartbeat_timeout: -1
-
-- name: web_service             # 应用名称，必须唯一。
-  cwd: /opt/app                 # 工作目录。
-  command: ./server             # 启动命令。
-  kill_timeout_s: 3             # 停止应用时的超时时间，单位秒，默认值为3；stop命令执行时，PM_Tiny会首先向应用发送SIGTERM信号，
-                                # 如果超过该时间应用还存在将向其发送SIGKILL信号。
-  
-  user: ""                      # 应用程序运行时的用户名，默认为空，空表示与运行PM_Tiny服务的用户一样。
-  depends_on:                   # 依赖的应用程序，必须等依赖的程序启动后，该程序才会启动。
-   - hardware_service
-   - ai_service 
-  start_timeout: 1              # 应用启动超时时间，单位秒，默认值0；如果为-1表示必须接收到应用程序的ready消息后才会标记为在线状态；
-                                # 如果大于零，在该值范围内收到应用程序ready消息，则标记为在线，否则将执行failure_action指定的动作。
-
-  failure_action: skip          # 启动超时和心跳超时执行的动作，其值可以为skip、restart、reboot，默认值为skip；
-                                # 当start_timeout>0时使用skip可以实现应用启动延时start_timeout秒
-                                # 后将其标记为在线；restart表示重启应用；reboot表示重启系统。
-  
-  daemon: true                  # 其中可以为true、false，默认值true；当为true时，程序退出后自动将其重启（不再需要退出码为非0的要求）；
-                                # 为false将不再重启程序。
-  
-  heartbeat_timeout: -1         # 单位秒，默认值-1；小于等于0表示不开启应用程序到PM_Tiny的心跳监测；
-                                # 大于0时，在该时间内如果未收到应用程序的心跳将执行failure_action指定的动作。
+  pty: false
+  depends_on: [database]
+  start_timeout: 10
+  failure_action: restart
 ```
 
-配置文件配置了三个服务hardware_service、ai_service、web_service。其中ai_service依赖于hardware_service，也就是说要等hardware_service启动后ai_service才能启动。
-web_service启动依赖于hardware_service和ai_service。
+`database` ready 后才会启动 `api`。配置加载、动态增加和 reload 都会拒绝缺失依赖、自依赖、重复依赖及环。更多字段参见 [`script/prog.yaml`](script/prog.yaml)。
 
-启动依赖只在pm_tiny服务启动过程中有效（如系统重启后，pm_tiny读取配置文件启动）。手动启停应用启动依赖无效。如果在运行过程中修改了配置文件可以使用`pm reload`重新载入配置，`pm_tiny`将停止所有应用，然后按照依赖配置启动程序。
+## 构建与验证
 
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPM_TINY_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake --install build
+```
 
+- Ubuntu systemd：`sudo make install_ubuntu`
+- Windows SCM：[`scripts/windows/`](scripts/windows)
+- Android 实机回归：[`scripts/test_android_process_tree.sh`](scripts/test_android_process_tree.sh)、[`scripts/test_android_restart_policy.sh`](scripts/test_android_restart_policy.sh)、[`scripts/test_android_dependency_graph.sh`](scripts/test_android_dependency_graph.sh)
 
-### 应用重启策略
+## 文档
 
-应用程序配置为daemon模式，运行时长超过100ms，满足此条件的程序退出后，pm_tiny才会重启程序。
+- [依赖图和启动状态机](docs/dependency_graph.md)
+- [进程树终止与 Android 约束](docs/process_tree_termination.md)
+- [IPC 协议 v2](docs/protocol_v2.md)
+- [Windows 移植状态与限制](docs/windows_port_status.md)
+- [项目定位、竞品分析与路线图](docs/project_roadmap.md)
 
-
+PM_Tiny 保持本地控制、低资源占用和离线部署，不计划替代 systemd/Android init/Windows SCM，也不在核心 daemon 中内置 Web UI、云管理或容器编排能力。

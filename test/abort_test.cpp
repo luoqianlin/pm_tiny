@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 2022/7/27.
-//
 
 #include <stdio.h>
 #include <unistd.h>

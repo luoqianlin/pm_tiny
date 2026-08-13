@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-10.
-//
 #include <string>
 #include <unistd.h>
 #include <fcntl.h>
@@ -13,12 +10,12 @@
 
 #define errExit(msg)    do { perror(msg); exit(EXIT_FAILURE); \
                                } while (0)
-int main() {
+int main(int argc, char *argv[]) {
     struct sockaddr_un serun{};
     int len;
     int sockfd;
 
-    auto sock_path = "/home/sansi/test_poll.sock";
+    const char *sock_path = argc > 1 ? argv[1] : "/tmp/pm_tiny_test_poll.sock";
 
     if ((sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
         perror("client socket error");

@@ -1,9 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 24-7-31.
-//
-//
-// Created by qianlinluo@foxmail.com on 24-7-23.
-//
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>

@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-10.
-//
 #include <string>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -44,7 +41,7 @@ int open_uds_listen_fd(const std::string &sock_path) {
 }
 
 int main(int argc, char *argv[]) {
-    char path[PATH_MAX] = "/home/sansi/test_poll.sock";
+    const char *path = argc > 1 ? argv[1] : "/tmp/pm_tiny_test_poll.sock";
     unlink(path);
     auto sock_fd = open_uds_listen_fd(path);
     printf("listen fd:%d\n", sock_fd);

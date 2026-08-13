@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-9-7.
-//
 #include "../sdk/PM_Tiny_app_client.h"
 #include <stdio.h>
 #include <stdlib.h>

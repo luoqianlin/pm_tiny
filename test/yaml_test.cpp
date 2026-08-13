@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-6-17.
-//
 #include <iostream>
 #include <yaml-cpp/yaml.h>
 #include <cassert>

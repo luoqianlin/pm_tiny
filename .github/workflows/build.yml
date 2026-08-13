@@ -1,0 +1,38 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - name: Build
+        run: cmake --build build -j2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows-msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - name: Build
+        run: cmake --build build-msvc --config Debug --parallel 2
+      - name: Test
+        run: ctest --test-dir build-msvc -C Debug --output-on-failure
+      - name: Upload Windows MSVC test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc-test-artifacts
+          path: |
+            build-msvc/test-artifacts/windows
+            build-msvc/test-artifacts/windows-service
+          if-no-files-found: ignore
+          retention-days: 7

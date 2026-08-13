@@ -1,14 +1,10 @@
-//
-// Created by qianlinluo@foxmail.com on 23-9-10.
-//
-#include "../src/frame_stream.hpp"
+#include "core/frame_stream.hpp"
 #include <iostream>
 
 int main() {
     pm_tiny::frame_t frame{1, 2, 3, 4, 2, 0, 0, 0, 'h'};
     pm_tiny::iframe_stream is(frame);
     int n;
-    double d;
     std::string name;
     is >> n;
     std::cout << "n:" << std::hex << n << std::endl;

@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-27.
-//
 #include <list>
 #include <cstdio>
 #include <iostream>

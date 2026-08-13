@@ -1,13 +1,12 @@
-//
-// Created by qianlinluo@foxmail.com on 23-6-21.
-//
 #include <chrono>
 #include <unistd.h>
 #include <iostream>
-#include "../src/time_util.h"
+#include "core/time_util.h"
 #include "../sdk/AppClient.h"
 
 int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
     auto start = std::chrono::steady_clock::now();
     for (auto env = environ; (*env) != nullptr; env++) {
         printf("%s\n", *env);

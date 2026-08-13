@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-10.
-//
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>

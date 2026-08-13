@@ -1,272 +1,124 @@
-![](images/shot.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/pm-tiny-logo-dark.svg">
+  <img src="images/pm-tiny-logo.svg" alt="PM_Tiny" width="640">
+</picture>
 
 # PM_Tiny
 
 [简体中文](README.md) | English
 
-## PM_Tiny Process Management Tool
+PM_Tiny is a lightweight cross-platform process supervisor for embedded devices and edge nodes. It reliably starts, monitors, stops, and recovers a set of local applications with dependency relationships.
 
-PM_Tiny (process manager tiny) is a process management tool for the Linux environment. It can start programs based on set dependencies and will restart applications if they exit unexpectedly, ensuring service availability. pm_tiny also redirects the output content of applications to log files. The log files implement cyclic overwriting to ensure that storage space is not consumed by excessive log outputs.
+It consists of the `pm_tiny` daemon and a command-line client: Linux and Windows use `pm`, while Android uses `pm2` to avoid conflicting with the platform's `/system/bin/pm` package manager.
 
-**The compiled executable file is very small (total size does not exceed 1MB), making it highly suitable for embedded Linux operation.**
+## Core Capabilities
 
-### Compilation
+- **Dependency orchestration**: Validate DAGs, start in stable topological order, block downstream nodes after dependency failures, and resume them after recovery.
+- **Automatic recovery**: Crash restart, exponential backoff, bounded restart windows, ready/tick heartbeats, and startup/heartbeat timeouts.
+- **Whole process-tree termination**: Linux/Android use cgroup v2 with process-group fallback; Windows uses Job Objects.
+- **Local IPC**: Linux/Android use Unix Domain Sockets and Windows uses named pipes, all carrying binary protocol v2.
+- **Observable CLI**: Adaptive tables, JSON status, dependency graphs, inspection, log streaming, and actionable connection diagnostics.
+- **Offline deployment**: A C++14/CMake project with pinned bundled dependencies for disconnected device build environments.
 
-The code is implemented in C++ (compiler must support C++14).
+## Architecture
 
-The project uses cmake for building. Ensure cmake is installed on your system.
-
-#### Compilation and Installation on Ubuntu
-```shell
-$ make build #Compile
-$ make install_ubuntu #Install
-$ systemctl start pm_tiny #Start
+```mermaid
+flowchart LR
+    CLI[pm / Android pm2] -->|local IPC v2| Daemon[pm_tiny]
+    Daemon --> DAG[Dependency graph and startup state]
+    Daemon --> Runtime[Monitoring and recovery]
+    Runtime --> Apps[Managed applications and descendants]
+    Apps -->|ready / tick| Daemon
 ```
 
-#### General Linux Platform Compilation
+`pm_tiny` owns configuration, dependency state, and runtime state. The CLI only queries or controls it through local IPC. The core opens no HTTP port and does not act as a container orchestrator or full init system.
 
-```shell
-$ mkdir build && cd build
-$ cmake ..
-$ cmake --build . --target pm_tiny --target pm --target pm_sdk
-$ cmake --install .
+## Quick Start (Linux)
+
+```bash
+git clone <repository-url> pm_tiny
+cd pm_tiny
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target pm_tiny pm
+
+./build/pm_tiny &
+./build/pm start "/usr/bin/sleep 300" --name demo --no_daemon --no_pty
+./build/pm list
+./build/pm graph
+./build/pm stop demo
+./build/pm delete demo
+./build/pm quit
 ```
 
-#### Compilation for Hi3559A V100 Platform
+The default runtime directory is `~/.pm_tiny`, with process definitions in `~/.pm_tiny/prog.yaml`. On production Ubuntu hosts, run `sudo make install_ubuntu` to install the systemd service.
 
-Ensure the corresponding SDK is installed. Cross-compilation toolchain should be located in the directory `/opt/hisi-linux/x86-arm`.
-```shell
-$ mkdir hisi_build && cd hisi_build
-$ cmake -DCMAKE_TOOLCHAIN_FILE=../toolchains/himix100.toolchain.cmake ..
-$ cmake --build . --target pm_tiny --target pm --target pm_sdk
-$ cmake --install .
-```
+## Platform Support
 
-#### Compilation for AX620A Platform
+| Platform | Status | CLI | Process-tree backend | Build/deployment entry |
+| --- | --- | --- | --- | --- |
+| Linux | Stable | `pm` | cgroup v2 / process group | `make build` or CMake |
+| Android | Supported | `pm2` | cgroup v2 / process group | Android NDK CMake; installed as `bin/pm2` |
+| Windows | Usable, still evolving | `pm.exe` | Job Object | VS 2022 MSVC; see [Windows status](docs/windows_port_status.md) |
+| Hi3559A / AX620A | Cross-build support | `pm` | Platform Linux capabilities | [`toolchains/`](toolchains) |
 
-Ensure the corresponding cross-compilation toolchain is installed. Add the commands `arm-linux-gnueabihf-gcc` and `arm-linux-gnueabihf-g++` to the environment variables.
-```shell
-BUILD_DIR=".ax_build"
-rm -rf ${BUILD_DIR}
-mkdir ${BUILD_DIR} && cd ${BUILD_DIR}
-cmake -DCMAKE_TOOLCHAIN_FILE=../toolchains/ax620a.toolchain.cmake ..
-cmake --build . --target pm_tiny --target pm --target pm_sdk
-cmake --install .
-```
+The Android CMake target remains named `pm`, so build it with `cmake --build <dir> --target pm`; the generated and installed device binary is `pm2`. This name only avoids the Android system command and is unrelated to the Node.js PM2 project.
 
-### Installation
-> For the Ubuntu environment, refer to [Compilation and Installation on Ubuntu](#compilation-and-installation-on-ubuntu). This step is not required for it.
+## Command Reference
 
-Copy the compiled files `build/pm_tiny` and `build/pm` to the environment variable path. Run the pm_tiny service (in a production environment, pm_tiny should be set to start on boot):
-```shell
-$ pm_tiny -d # -d option runs in daemon mode
-```
+| Command | Description |
+| --- | --- |
+| `pm list [--wide\|--json] [--no-color]` | Show runtime status; replace `pm` with `pm2` on Android. |
+| `pm graph [name] [--json\|--dot]` | Show the full DAG or a focused upstream/downstream subgraph. |
+| `pm start <command> --name <name> [options]` | Dynamically add and start a process on Linux/Android. |
+| `pm start <name>` | Start a configured process and its dependency closure. |
+| `pm stop\|restart\|delete <name>` | Stop, restart, or remove a process. |
+| `pm log\|inspect <name>` | Stream logs or inspect configuration and runtime details. |
+| `pm save` / `pm reload` | Persist current definitions or reload the configuration file. |
+| `pm quit` / `pm version` | Stop the daemon or show its version. |
 
-### Usage
+Use `pm --help` (`pm2 --help` on Android) for all options. `list --json` and `graph --json` provide stable structured output for automation.
 
-To manage a program with pm_tiny:
-
-1. Add a program:
-
-```shell
-$ pm start "node test.js arg0 arg1" --name app_name #Run app.js, name it as app_name. This name is used for subsequent management and must be unique.
-Success
-Total:1
- ------------------------------------------------------------------------------------------
-| pid   | name     | cwd                      | command                 | restart | state  |
- ------------------------------------------------------------------------------------------
-| 21864 | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | online |
- ------------------------------------------------------------------------------------------
-```
-
-Available options include:
-
-`--kill_timeout <seconds>` Timeout for stopping the application, in seconds, default is 3. When the `pm stop` command is executed, PM_Tiny first sends a `SIGTERM` signal to the application. If the app remains running beyond this timeout, a `SIGKILL` signal is sent.
-
-`--user <user>` The username under which the application runs. Default is empty, which means it runs as the same user as the PM_Tiny service.
-
-`--depends_on <other_apps>` Applications that the current application depends on. This application will only start after its dependencies have started. Different program names are separated by commas.
-
-`--start_timeout <seconds>` Application start timeout in seconds. Default is 0. If -1, the application must send a ready message before being marked online. If greater than zero, the application will be marked online within this time if a ready message is received; otherwise, the action specified by `failure_action` will be executed.
-
-`--failure_action <skip|restart|reboot>` Actions to execute upon start timeout and heartbeat timeout. Valid values are `skip`, `restart`, and `reboot` with the default being `skip`. Using `skip` with `start_timeout`>0 means the application will be marked online after a delay of `start_timeout` seconds. `restart` will restart the application, while `reboot` will reboot the system.
-
-`--heartbeat_timeout <seconds>` Default is -1 seconds. Values less than or equal to 0 mean no heartbeat monitoring from the application to PM_Tiny. If greater than 0, the specified action by `failure_action` will be executed if no heartbeat is received from the application within this time.
-
-`--no_daemon` Running with this option means it won't run in `daemon` mode and won't restart after the program exits.
-
-`--log` Indicates that the program should run and display its output.
-
-2. View a program:
-
-```shell
-$ pm ls 
-Total:1
- ------------------------------------------------------------------------------------------
-| pid   | name     | cwd                      | command                 | restart | state  |
- ------------------------------------------------------------------------------------------
-| 21864 | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | online |
- ------------------------------------------------------------------------------------------
-```
-
-3. Stop a program:
-
-```shell
-$ pm stop app_name
-Success
-Total:1
- ----------------------------------------------------------------------------------------
-| pid | name     | cwd                      | command                 | restart | state  |
- ----------------------------------------------------------------------------------------
-| -1  | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | stopped|
- ----------------------------------------------------------------------------------------
-```
-
-4. Run a program:
-
-```shell
-$ pm start app_name
-Success
-Total:1
- ------------------------------------------------------------------------------------------
-| pid   | name     | cwd                      | command                 | restart | state  |
- ------------------------------------------------------------------------------------------
-| 22047 | app_name | /home/xx/pm_tiny/default |  node test.js arg0 arg1 | 0       | online |
- ------------------------------------------------------------------------------------------
-```
-
-You can optionally add the `--log` option, which means the program will run and display its output.
-
-5. View program output:
-
-```shell
-$ pm log app_name
-```
-
-6. View program configuration:
-
-```shell
-$ pm inspect app_name
-+-------------------+----------------------------------+
-| name              | app_name                         |
-+-------------------+----------------------------------+
-| cwd               | /home/xx/pm_tiny/default         |
-+-------------------+----------------------------------+
-| command           |  node test.js arg0 arg1          |  
-+-------------------+----------------------------------+
-| user              | root                             |
-+-------------------+----------------------------------+
-| daemon            | Y                                |
-+-------------------+----------------------------------+
-| depends_on        |                                  |
-+-------------------+----------------------------------+
-| start_timeout     | available immediately            |
-+-------------------+----------------------------------+
-| failure_action    | skip                             |
-+-------------------+----------------------------------+
-| heartbeat_timeout | disable                          |
-+-------------------+----------------------------------+
-| kill_timeout      | 3s                               |
-+-------------------+----------------------------------+
-```
-
-7. Delete a program:
-
-```shell
-$ pm delete app_name
-Success
-Total:0
- ----------------------------------------------
-| pid | name | cwd | command | restart | state |
- ----------------------------------------------
-```
-
-8. Persist startup configuration so that pm_tiny starts the programs listed in the configuration upon service startup (configuration is saved in the `~/.pm_tiny/prog.cfg` file by default):
-
-```shell
-$ pm save
-Success
-```
-
-### Configuration
-
-The default home directory for pm_tiny (PM_TINY_HOME) is `~/.pm_tiny`. You can also specify a different home directory by modifying the `PM_TINY_HOME` environment variable.
-
-The application's output logs are saved in the `${PM_TINY_HOME}/logs` directory by default.
-
-The configuration file is located at `${PM_TINY_HOME}/prog.yaml`.
-
-Here's an example configuration file:
+## Minimal Dependency Configuration
 
 ```yaml
-- name: hardware_service
-  cwd: /opt/hardware
-  command: ./hardware_server
-  kill_timeout_s: 3
-  user: ""
-  depends_on:
-    []
-  start_timeout: 2
-  failure_action: skip
+- name: database
+  cwd: /opt/app
+  command: ./database
   daemon: true
-  heartbeat_timeout: -1
+  pty: false
 
-- name: ai_service
-  cwd: /opt/algo
-  command: ./ai_server
-  kill_timeout_s: 10
-  user: ""
-  depends_on:
-    - hardware_service
-  start_timeout: 5
-  failure_action: skip
+- name: api
+  cwd: /opt/app
+  command: ./api
   daemon: true
-  heartbeat_timeout: -1
-
-- name: web_service   # Application name; must be unique.
-  cwd: /opt/app       # Working directory.
-  command: ./server   # Startup command.
-  
-  kill_timeout_s: 3   # Timeout for stopping the application, in seconds. 
-                      # Default value is 3. When executing the 'stop' command,
-                      # PM_Tiny will first send a SIGTERM signal to the application. 
-                      # If the application remains running beyond this timeout, a SIGKILL signal will be sent to it.
-  
-  user: ""            # Username under which the application runs. 
-                      # Default is empty, which means the application runs as the same user as the PM_Tiny service.
-  
-  depends_on:         # Applications on which this one depends.
-                      # This application will start only after its dependencies have started.
-    - hardware_service
-    - ai_service
-  start_timeout: 1    # Application start timeout in seconds. 
-                      # Default value is 0. If set to -1, 
-                      # it means the application must send a 'ready' message before being marked as online. 
-                      # If greater than zero and a 'ready' message from the application is received within this time,
-                      # it will be marked as online; otherwise, the action specified by 'failure_action' will be taken.
-  
-  failure_action: skip # Action to take upon startup timeout and heartbeat timeout. 
-                      # Valid values are 'skip', 'restart', and 'reboot' with default being 'skip'.
-                      # If 'start_timeout' > 0, using 'skip' means the application will be marked online 
-                      # after a delay of 'start_timeout' seconds. 
-                      # 'restart' means the application will be restarted; 'reboot' means the system will be rebooted.
-  
-  daemon: true        # Valid values are true or false, with default being true. 
-                      # When set to true, the program will be automatically restarted 
-                      # if it exits (no requirement for non-zero exit code). 
-                      # If set to false, the program won't be restarted.
-  
-  heartbeat_timeout: -1 # Specified in seconds. Default value is -1. 
-                        # Values less than or equal to 0 mean no heartbeat monitoring from the application to PM_Tiny. 
-                        # If greater than 0 and no heartbeat from the application is received within this time, 
-                        # the action specified by 'failure_action' will be executed.
-
+  pty: false
+  depends_on: [database]
+  start_timeout: 10
+  failure_action: restart
 ```
 
-The configuration file configures three services: hardware_service, ai_service, and web_service. ai_service depends on hardware_service, meaning hardware_service must start before ai_service can. web_service depends on both hardware_service and ai_service.
+`api` starts only after `database` becomes ready. Configuration load, dynamic addition, and reload reject missing, self, duplicate, and cyclic dependencies. See [`script/prog.yaml`](script/prog.yaml) for more fields.
 
-The startup dependency is only effective during the pm_tiny service startup process (for example, after a system reboot when pm_tiny reads the configuration file to start). Manual start/stop of applications doesn't consider startup dependencies. If the configuration file is modified during operation, you can use `pm reload` to reload the configuration. `pm_tiny` will stop all applications and then start programs based on the dependency configuration.
+## Build and Test
 
-### Application Restart Strategy
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPM_TINY_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake --install build
+```
 
-When an application is configured in daemon mode and runs for more than 100ms, pm_tiny will restart the program after it exits if these conditions are met.
+- Ubuntu systemd: `sudo make install_ubuntu`
+- Windows SCM: [`scripts/windows/`](scripts/windows)
+- Android device regression: [`scripts/test_android_process_tree.sh`](scripts/test_android_process_tree.sh), [`scripts/test_android_restart_policy.sh`](scripts/test_android_restart_policy.sh), [`scripts/test_android_dependency_graph.sh`](scripts/test_android_dependency_graph.sh)
+
+## Documentation
+
+- [Dependency graph and startup state](docs/dependency_graph.md)
+- [Process-tree termination and Android constraints](docs/process_tree_termination.md)
+- [IPC protocol v2](docs/protocol_v2.md)
+- [Windows port status and limitations](docs/windows_port_status.md)
+- [Project direction, comparisons, and roadmap](docs/project_roadmap.md)
+
+PM_Tiny remains local-first, low-overhead, and offline deployable. It does not aim to replace systemd, Android init, or Windows SCM, and the core daemon will not embed a Web UI, cloud management plane, or container orchestration layer.

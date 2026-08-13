@@ -1,10 +1,8 @@
-//
-// Created by qianlinluo@foxmail.com on 22-8-5.
-//
 
-#include "../src//ScopeGuard.h"
+#include "core/ScopeGuard.h"
 
 #include <exception>
+#include <stdexcept>
 #include <assert.h>
 
 using namespace pm_tiny;

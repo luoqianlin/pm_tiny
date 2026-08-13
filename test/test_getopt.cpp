@@ -1,6 +1,3 @@
-//
-// Created by qianlinluo@foxmail.com on 23-7-25.
-//
 #include <stdio.h>     /* for printf */
 #include <stdlib.h>    /* for exit */
 #include <getopt.h>
