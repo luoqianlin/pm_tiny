@@ -54,7 +54,7 @@ DAEMON_PID=$!
 for _ in $(seq 1 50); do [[ -S "$TMP/pm.sock" ]] && break; sleep .05; done
 [[ -S "$TMP/pm.sock" ]]
 
-"$BIN/pm" --version | grep -q 'pm_tiny: 1.1.4'
+"$BIN/pm" --version | grep -q 'pm_tiny: 2.0.0'
 "$BIN/pm" ls | grep -q 'Total: 0'
 "$BIN/pm" ls --json | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data == {"schema_version": 2, "total": 0, "processes": []}'
 "$BIN/pm" save

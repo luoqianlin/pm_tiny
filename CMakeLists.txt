@@ -6,7 +6,13 @@ cmake_minimum_required(VERSION 3.10)
 if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
-project(pm_tiny VERSION 1.1.4 LANGUAGES C CXX)
+if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
+    set(ANDROID_STL c++_static CACHE STRING
+            "Android C++ runtime linkage" FORCE)
+    set(CMAKE_ANDROID_STL_TYPE c++_static CACHE STRING
+            "Android C++ runtime linkage" FORCE)
+endif ()
+project(pm_tiny VERSION 2.0.0 LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 
@@ -332,6 +338,18 @@ endif ()
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
     set_target_properties(pm PROPERTIES OUTPUT_NAME pm2)
+
+    if (NOT CMAKE_READELF)
+        message(FATAL_ERROR "Android build requires CMAKE_READELF to verify runtime dependencies")
+    endif ()
+    foreach(PM_TINY_ANDROID_EXECUTABLE IN ITEMS pm_tiny pm)
+        add_custom_command(TARGET ${PM_TINY_ANDROID_EXECUTABLE} POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                -DPM_TINY_READELF=${CMAKE_READELF}
+                -DPM_TINY_EXECUTABLE=$<TARGET_FILE:${PM_TINY_ANDROID_EXECUTABLE}>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_android_no_shared_libcxx.cmake
+                VERBATIM)
+    endforeach()
 endif ()
 
 add_subdirectory(sdk)

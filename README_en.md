@@ -63,6 +63,7 @@ The default runtime directory is `~/.pm_tiny`, with process definitions in `~/.p
 | Hi3559A / AX620A | Cross-build support | `pm` | Platform Linux capabilities | [`toolchains/`](toolchains) |
 
 The Android CMake target remains named `pm`, so build it with `cmake --build <dir> --target pm`; the generated and installed device binary is `pm2`. This name only avoids the Android system command and is unrelated to the Node.js PM2 project.
+Android builds statically link libc++, so release binaries do not depend on `libc++_shared.so`.
 
 ## Command Reference
 
@@ -120,5 +121,10 @@ cmake --install build
 - [IPC protocol v2](docs/protocol_v2.md)
 - [Windows port status and limitations](docs/windows_port_status.md)
 - [Project direction, comparisons, and roadmap](docs/project_roadmap.md)
+- [Benchmarks and project comparison](docs/benchmark.md)
 
 PM_Tiny remains local-first, low-overhead, and offline deployable. It does not aim to replace systemd, Android init, or Windows SCM, and the core daemon will not embed a Web UI, cloud management plane, or container orchestration layer.
+
+## License
+
+PM_Tiny is released under the [Apache License 2.0](LICENSE). Bundled third-party dependencies remain under their respective licenses.

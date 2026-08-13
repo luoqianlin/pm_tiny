@@ -36,7 +36,7 @@ adb -s "$SERIAL" shell "chmod 755 '$REMOTE/pm_tiny' '$REMOTE/pm2_test'"
 
 adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET PM_TINY_PROG_CFG_FILE=$REMOTE/prog.yaml nohup $REMOTE/pm_tiny >$REMOTE/daemon.log 2>&1 &"
 for _ in $(seq 1 100); do
-    if adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET $REMOTE/pm2_test version" 2>/dev/null | grep -q "1.1.4"; then
+    if adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET $REMOTE/pm2_test version" 2>/dev/null | grep -q "2.0.0"; then
         break
     fi
     sleep .1

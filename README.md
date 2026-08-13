@@ -63,6 +63,7 @@ cmake --build build --target pm_tiny pm
 | Hi3559A / AX620A | 交叉编译支持 | `pm` | 平台 Linux 能力 | [`toolchains/`](toolchains) |
 
 Android 的 CMake target 仍名为 `pm`，因此使用 `cmake --build <dir> --target pm` 构建，但生成和安装的设备端文件名为 `pm2`。这里的名称仅用于避开 Android 系统命令，与 Node.js 的 PM2 项目无关。
+Android 构建固定静态链接 libc++，发布产物不依赖 `libc++_shared.so`。
 
 ## 常用命令
 
@@ -120,5 +121,10 @@ cmake --install build
 - [IPC 协议 v2](docs/protocol_v2.md)
 - [Windows 移植状态与限制](docs/windows_port_status.md)
 - [项目定位、竞品分析与路线图](docs/project_roadmap.md)
+- [基准与同类项目对比](docs/benchmark.md)
 
 PM_Tiny 保持本地控制、低资源占用和离线部署，不计划替代 systemd/Android init/Windows SCM，也不在核心 daemon 中内置 Web UI、云管理或容器编排能力。
+
+## 许可证
+
+PM_Tiny 采用 [Apache License 2.0](LICENSE) 发布。仓库内第三方依赖继续适用各自的许可证。
