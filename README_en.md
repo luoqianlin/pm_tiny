@@ -135,6 +135,7 @@ cmake --install build
 - [Windows port status and limitations](docs/windows_port_status.md)
 - [Project directory and test conventions](docs/project_structure.md)
 - [Project direction, comparisons, and roadmap](docs/project_roadmap.md)
+- [Benchmarks and project comparison](docs/benchmark.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing guide](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)

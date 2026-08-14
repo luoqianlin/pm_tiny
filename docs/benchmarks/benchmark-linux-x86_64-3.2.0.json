@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "pm_tiny_version": "3.2.0",
+  "environment": {
+    "architecture": "x86_64",
+    "kernel": "6.8.0-137-generic",
+    "cpu_model": "Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz",
+    "logical_cpu_count": 8,
+    "compiler": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "build_type": "Release"
+  },
+  "binary_size_bytes": {
+    "pm_tiny": 1641688,
+    "pm": 1652680
+  },
+  "daemon_rss_kib": {
+    "idle": 5000,
+    "with_20_managed_processes": 6788
+  },
+  "list_json_latency_ms": {
+    "samples": 30,
+    "median": 1.898,
+    "p95": 2.17
+  },
+  "start_20_processes_ms": 910.636,
+  "crash_restart_interval_ms": 1007.042
+}

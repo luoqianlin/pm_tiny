@@ -135,6 +135,7 @@ cmake --install build
 - [Windows 移植状态与限制](docs/windows_port_status.md)
 - [项目目录结构与测试约定](docs/project_structure.md)
 - [项目定位、竞品分析与路线图](docs/project_roadmap.md)
+- [基准与同类项目对比](docs/benchmark.md)
 - [变更记录](CHANGELOG.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
