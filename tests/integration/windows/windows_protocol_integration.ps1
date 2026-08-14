@@ -729,6 +729,8 @@ function Run-LogClientIsolationScenario {
     if ($LASTEXITCODE -ne 0) { throw "pm log Ctrl+C did not return 130" }
     Assert-Contains (Invoke-Pm @("version")) "Windows v3" "daemon after log Ctrl+C"
     Wait-For-State "flood" "online" 5 "flood remains online after log Ctrl+C"
+    Assert-Contains (Invoke-Pm @("stop", "flood")) "OK stopped" "stop log flood"
+    Wait-For-State "flood" "stopped" 10 "log flood stopped state"
     Stop-TestDaemon
 }
 
