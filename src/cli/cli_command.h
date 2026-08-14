@@ -4,6 +4,7 @@
 #include "pm_tiny_enum.h"
 #include "dependency_graph_renderer.h"
 #include "process_list_renderer.h"
+#include "program_log.h"
 
 #include <cstdint>
 #include <string>
@@ -26,23 +27,37 @@ enum class command_kind {
     reload,
     quit,
     version,
+    info,
 };
 
 struct start_command_options {
-    std::string command;
     std::string name;
+    std::string cwd;
+    std::string executable;
+    std::vector<std::string> args;
     int kill_timeout_sec = 3;
     std::string run_as;
-    std::vector<std::string> env_vars;
+    std::vector<std::string> env;
     std::vector<std::string> depends_on;
     int start_timeout = 0;
     failure_action_t failure_action = failure_action_t::SKIP;
     bool daemon = true;
     int heartbeat_timeout = -1;
     int oom_score_adj = 0;
-    bool pty = true;
+    bool pty = false;
     bool show_log = false;
-    bool has_definition_options = false;
+    log_mode_t log_mode = log_mode_t::split;
+    bool log_mode_explicit = false;
+    std::string log_dir;
+    std::string log_file_name;
+    int log_max_size_kb = 4096;
+    int log_archive_count = 3;
+    bool create = false;
+    int restart_delay_ms = 1000;
+    int restart_max_delay_ms = 30000;
+    int restart_window_ms = 60000;
+    int restart_max_attempts = 10;
+    int restart_reset_after_ms = 60000;
 };
 
 struct parsed_command {
@@ -52,6 +67,7 @@ struct parsed_command {
     list_render_options list_options;
     dependency_graph_render_options graph_options;
     start_command_options start;
+    bool info_json = false;
 };
 
 struct command_parse_result {

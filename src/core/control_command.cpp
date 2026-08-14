@@ -17,6 +17,7 @@ bool is_known_control_command(std::uint16_t type) {
         case control_command::inspect:
         case control_command::reload:
         case control_command::quit:
+        case control_command::info:
             return true;
     }
     return false;
@@ -25,7 +26,6 @@ bool is_known_control_command(std::uint16_t type) {
 bool control_command_requires_name(control_command command) {
     switch (command) {
         case control_command::stop:
-        case control_command::start:
         case control_command::remove:
         case control_command::restart:
         case control_command::log:
@@ -34,10 +34,12 @@ bool control_command_requires_name(control_command command) {
         case control_command::inspect:
             return true;
         case control_command::list:
+        case control_command::start:
         case control_command::save:
         case control_command::version:
         case control_command::reload:
         case control_command::quit:
+        case control_command::info:
             return false;
     }
     return false;
@@ -58,6 +60,7 @@ const char *control_command_name(control_command command) {
         case control_command::inspect: return "inspect";
         case control_command::reload: return "reload";
         case control_command::quit: return "quit";
+        case control_command::info: return "info";
     }
     return "unknown";
 }
@@ -69,6 +72,10 @@ decoded_control_request decode_control_request(const protocol_message &request) 
         return result;
     }
     result.command = static_cast<control_command>(request.type);
+    if (result.command == control_command::info && !request.payload.empty()) {
+        result.error = "info request payload must be empty";
+        return result;
+    }
     if (control_command_requires_name(result.command)) {
         try {
             iframe_stream stream(request.payload);

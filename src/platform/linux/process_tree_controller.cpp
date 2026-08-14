@@ -79,8 +79,10 @@ bool process_tree_controller::initialize(process_tree_mode requested,
                                           const std::string &instance_key,
                                           std::string &reason) {
     reason.clear();
+    requested_mode_ = requested;
     effective_mode_ = requested;
     root_.clear();
+    degradation_reason_.clear();
     backend_.reset();
     if (requested == process_tree_mode::process_group) {
         backend_ = std::make_unique<process_group_backend>();
@@ -93,6 +95,7 @@ bool process_tree_controller::initialize(process_tree_mode requested,
         reason = "cgroup v2 cgroup.procs is unavailable";
         if (requested == process_tree_mode::cgroup) return false;
         effective_mode_ = process_tree_mode::process_group;
+        degradation_reason_ = reason;
         backend_ = std::make_unique<process_group_backend>();
         return true;
     }
@@ -100,6 +103,7 @@ bool process_tree_controller::initialize(process_tree_mode requested,
     if (!cgroup_fs_->create_group(root_, reason)) {
         if (requested == process_tree_mode::cgroup) return false;
         effective_mode_ = process_tree_mode::process_group;
+        degradation_reason_ = reason;
         root_.clear();
         backend_ = std::make_unique<process_group_backend>();
         return true;
@@ -127,6 +131,7 @@ bool process_tree_controller::initialize(process_tree_mode requested,
         root_.clear();
         if (requested == process_tree_mode::cgroup) return false;
         effective_mode_ = process_tree_mode::process_group;
+        degradation_reason_ = reason;
         backend_ = std::make_unique<process_group_backend>();
         return true;
     }

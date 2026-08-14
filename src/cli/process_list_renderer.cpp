@@ -172,6 +172,18 @@ std::string join_dependencies(const std::vector<std::string> &dependencies) {
     return result;
 }
 
+std::string shell_preview(const process_list_entry &entry) {
+    auto quote = [](const std::string &value) {
+        if (!value.empty() && value.find_first_of(" \t\r\n'\"\\") == std::string::npos) return value;
+        std::string out = "'";
+        for (const auto ch : value) out += ch == '\'' ? "'\\''" : std::string(1, ch);
+        return out + "'";
+    };
+    std::string result = quote(entry.executable);
+    for (const auto &arg : entry.args) result += " " + quote(arg);
+    return result;
+}
+
 fort::color state_color(std::int32_t state) {
     switch (state) {
         case PM_TINY_PROG_STATE_RUNING: return fort::color::green;
@@ -207,7 +219,8 @@ std::string json_output(const std::vector<process_list_entry> &entries) {
         else item["pty"] = entry.pty == pty_mode_t::enabled;
         item["depends_on"] = entry.depends_on;
         item["cwd"] = entry.cwd;
-        item["command"] = entry.command;
+        item["executable"] = entry.executable;
+        item["args"] = entry.args;
         item["restart_pending"] = entry.restart_pending;
         item["restart_delay_remaining_ms"] = entry.restart_pending ?
             json(entry.restart_delay_remaining_ms) : json(nullptr);
@@ -215,6 +228,22 @@ std::string json_output(const std::vector<process_list_entry> &entries) {
         item["restart_suppressed"] = entry.restart_suppressed;
         item["restart_suppression_reason"] = entry.restart_suppressed ?
             json(entry.restart_suppression_reason) : json(nullptr);
+        item["generation"] = entry.generation;
+        item["ready"] = entry.ready;
+        item["heartbeat_enabled"] = entry.heartbeat_enabled;
+        item["last_exit_reason"] = entry.has_last_exit ? json(entry.last_exit_reason) : json(nullptr);
+        item["last_exit_code"] = entry.has_last_exit ? json(entry.last_exit_code) : json(nullptr);
+        item["process_tree_backend"] = entry.process_tree_backend.empty() ?
+            json(nullptr) : json(entry.process_tree_backend);
+        item["process_tree_degraded"] = entry.process_tree_degraded;
+        item["process_tree_degradation_reason"] = entry.process_tree_degraded ?
+            json(entry.process_tree_degradation_reason) : json(nullptr);
+        item["config_source"] = entry.config_source.empty() ? json(nullptr) : json(entry.config_source);
+        item["log_degraded"] = entry.log_degraded;
+        item["log_dropped_bytes"] = entry.log_dropped_bytes;
+        item["log_last_error"] = entry.log_last_error.empty() ? json(nullptr) : json(entry.log_last_error);
+        item["log_retry_remaining_ms"] = entry.log_degraded ? json(entry.log_retry_remaining_ms) : json(nullptr);
+        item["log_paths"] = entry.log_paths;
         root["processes"].push_back(std::move(item));
     }
     return root.dump(2) + "\n";
@@ -231,21 +260,21 @@ std::string render_process_list(const std::vector<process_list_entry> &entries,
     std::vector<column_spec> columns;
     if (options.wide) {
         columns = {{"name", 16}, {"pid", 8, true}, {"state", 8}, {"uptime", 8, true},
-                   {"restarts", 8, true}, {"retry", 10}, {"memory", 10, true}, {"daemon", 6},
-                   {"pty", 3}, {"depends_on", 14}, {"cwd", 22}, {"command", 28}};
+                   {"restarts", 8, true}, {"retry", 10}, {"log", 8}, {"memory", 10, true},
+                   {"daemon", 6}, {"pty", 3}, {"depends_on", 14}, {"cwd", 22}, {"command", 28}};
         const std::size_t fixed_overhead = columns.size() * 3 + 1;
         const std::size_t minimum_content = 61;
         if (terminal_width > fixed_overhead + minimum_content) {
             std::size_t extra = terminal_width - fixed_overhead - minimum_content;
-            columns[11].width = 7 + extra * 45 / 100;
-            columns[10].width = 3 + extra * 30 / 100;
+            columns[12].width = 7 + extra * 48 / 100;
+            columns[11].width = 3 + extra * 27 / 100;
             columns[0].width = 4 + extra * 15 / 100;
-            columns[9].width = 10 + extra * 10 / 100;
+            columns[10].width = 10 + extra * 10 / 100;
         } else {
             columns[0].width = 4;
-            columns[9].width = 10;
-            columns[10].width = 3;
-            columns[11].width = 7;
+            columns[10].width = 10;
+            columns[11].width = 3;
+            columns[12].width = 7;
         }
     } else {
         columns = {{"name", 24}, {"pid", 8, true}, {"state", 8}, {"uptime", 8, true},
@@ -286,6 +315,7 @@ std::string render_process_list(const std::vector<process_list_entry> &entries,
             return std::string("-");
         }
         if (column.title == "memory") return entry.has_rss ? format_memory(entry.rss_kib) : std::string("-");
+        if (column.title == "log") return entry.log_degraded ? std::string("degraded") : std::string("ok");
         if (column.title == "daemon") return entry.daemon ? std::string("Y") : std::string("N");
         if (column.title == "pty") {
             if (entry.pty == pty_mode_t::unsupported) return std::string("-");
@@ -295,7 +325,7 @@ std::string render_process_list(const std::vector<process_list_entry> &entries,
             return truncate_prefix(sanitize_table_text(join_dependencies(entry.depends_on)), column.width);
         }
         if (column.title == "cwd") return truncate_suffix(sanitize_table_text(entry.cwd), column.width);
-        return truncate_prefix(sanitize_table_text(entry.command), column.width);
+        return truncate_prefix(sanitize_table_text(shell_preview(entry)), column.width);
     };
 
     for (const auto &entry : entries) {

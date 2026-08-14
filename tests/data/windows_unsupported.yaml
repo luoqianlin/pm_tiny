@@ -1,0 +1,5 @@
+- name: unsupported_pty
+  executable: cmd.exe
+  args: ["/c", "exit", "0"]
+  cwd: '__WORK_DIR__'
+  pty: true

@@ -24,11 +24,16 @@ public:
     void cleanup(process_tree_handle &handle) const;
     process_tree_mode effective_mode() const { return effective_mode_; }
     const std::string &root() const { return root_; }
+    bool degraded() const { return requested_mode_ == process_tree_mode::auto_detect &&
+                                   effective_mode_ != process_tree_mode::cgroup; }
+    const std::string &degradation_reason() const { return degradation_reason_; }
     static bool enable_subreaper(std::string &reason);
 
 private:
     process_tree_mode effective_mode_ = process_tree_mode::process_group;
+    process_tree_mode requested_mode_ = process_tree_mode::auto_detect;
     std::string root_;
+    std::string degradation_reason_;
     std::unique_ptr<process_tree_backend> backend_;
     std::shared_ptr<cgroup_fs> cgroup_fs_;
 };

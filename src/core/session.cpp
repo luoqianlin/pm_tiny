@@ -19,6 +19,8 @@
 #endif
 namespace pm_tiny {
 
+    namespace { constexpr std::size_t session_queue_limit = 1024U * 1024U; }
+
     std::ostream &operator<<(std::ostream &os, frame_t const &f) {
         std::stringstream ss;
         ss << std::hex << std::uppercase << std::setfill('0');
@@ -119,8 +121,10 @@ namespace pm_tiny {
                     int remaning = (int) (f->size() - wbytes);
                     if (remaning > 0) {
                         f->erase(f->begin(), f->begin() + wbytes);
+                        queued_bytes_ -= static_cast<std::size_t>(wbytes);
                         break;
                     } else {
+                        queued_bytes_ -= f->size();
                         this->send_buf.pop_front();
                     }
                 } else {
@@ -157,6 +161,8 @@ namespace pm_tiny {
     int session_t::sbuf_size() const {
         return (int) this->send_buf.size();
     }
+
+    std::size_t session_t::queued_bytes() const { return queued_bytes_; }
 
     int session_t::rbuf_size() const {
         return (int) this->recv_messages_.size();
@@ -224,6 +230,11 @@ namespace pm_tiny {
         auto encoded = protocol_encode(message);
         auto wf = std::make_unique<pm_tiny::frame_t>(encoded.begin(), encoded.end());
         if (!this->is_close()) {
+            if (queued_bytes_ + wf->size() > session_queue_limit) {
+                this->close();
+                return -1;
+            }
+            queued_bytes_ += wf->size();
             this->send_buf.emplace_back(std::move(wf));
             int n = 0;
             do {
@@ -245,6 +256,11 @@ namespace pm_tiny {
         message.payload.assign(f->begin() + 1, f->end());
         auto encoded = protocol_encode(message);
         auto wf = std::make_unique<pm_tiny::frame_t>(encoded.begin(), encoded.end());
+        if (queued_bytes_ + wf->size() > session_queue_limit) {
+            this->close();
+            return -1;
+        }
+        queued_bytes_ += wf->size();
         this->send_buf.emplace_back(std::move(wf));
         int n = 0;
         do { n += this->write(); } while (block && this->sbuf_size() > 0 && !this->is_close());
@@ -261,6 +277,11 @@ namespace pm_tiny {
         message.payload = *f;
         auto encoded = protocol_encode(message);
         auto wf = std::make_unique<pm_tiny::frame_t>(encoded.begin(), encoded.end());
+        if (queued_bytes_ + wf->size() > session_queue_limit) {
+            this->close();
+            return -1;
+        }
+        queued_bytes_ += wf->size();
         this->send_buf.emplace_back(std::move(wf));
         int n = 0;
         do { n += this->write(); } while (block && this->sbuf_size() > 0 && !this->is_close());

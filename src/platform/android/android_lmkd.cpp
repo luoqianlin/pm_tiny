@@ -7,8 +7,9 @@
 #include <pwd.h>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <arpa/inet.h>
-#include "log.h"
+#include "daemon_log.h"
 #include "pm_sys.h"
 
 namespace pm_tiny {
@@ -16,21 +17,18 @@ namespace pm_tiny {
     CloseableFd connect_lmkd() {
         const char *socket_path = "/dev/socket/lmkd";
         int sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
-        if (sock < 0) {
-            std::string errorMsg = get_error_msg();
-            PM_TINY_THROW("socket:%s", errorMsg.c_str());
-        }
+        if (sock < 0)
+            throw std::system_error(errno, std::generic_category(), "socket");
+        CloseableFd socket_fd(sock);
         struct sockaddr_un addr{};
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-        int ret = connect(sock, (struct sockaddr *) &addr, sizeof(addr));
-        if (ret < 0) {
-            std::string errorMsg = get_error_msg();
-            PM_TINY_THROW("connect:%s", errorMsg.c_str());
-        }
-        return CloseableFd{sock};
+        int ret = connect(socket_fd.fd_, (struct sockaddr *) &addr, sizeof(addr));
+        if (ret < 0)
+            throw std::system_error(errno, std::generic_category(), "connect");
+        return socket_fd;
     }
 
     int lmk_procprio(int sock,pid_t pid,uid_t uid,int oom_score_adj) {

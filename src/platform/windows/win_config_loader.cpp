@@ -2,9 +2,16 @@
 
 #include "core/prog_cfg_yaml_helper.h"
 #include "core/prog_cfg_order.h"
+#include "daemon_log.h"
+#include "win_utils.h"
+#include "windows_program_persistence.h"
 
 #include <yaml-cpp/yaml.h>
 
+#include <windows.h>
+
+#include <algorithm>
+#include <cwchar>
 #include <iostream>
 #include <sstream>
 
@@ -19,84 +26,124 @@ ProgramConfig make_program_config(const prog_cfg_t &base) {
     return cfg;
 }
 
-void apply_windows_overrides(const YAML::Node &node,
-                             ProgramConfig &cfg,
-                             std::vector<std::string> &warnings) {
-    auto append_warning = [&](const std::string &message) {
-        warnings.push_back(message);
-    };
-
-    auto read_optional_int = [&](const char *key, int &target) {
-        auto value = node[key];
-        if (!value) {
-            return;
-        }
-        try {
-            target = value.as<int>();
-        } catch (const YAML::Exception &ex) {
-            std::ostringstream oss;
-            oss << "Program `" << cfg.name << "` field `" << key << "` invalid: " << ex.what();
-            append_warning(oss.str());
-        }
-    };
-
-    auto read_optional_string = [&](const char *key, std::string &target) {
-        auto value = node[key];
-        if (!value) {
-            return;
-        }
-        try {
-            target = value.as<std::string>();
-        } catch (const YAML::Exception &ex) {
-            std::ostringstream oss;
-            oss << "Program `" << cfg.name << "` field `" << key << "` invalid: " << ex.what();
-            append_warning(oss.str());
-        }
-    };
-
-    read_optional_int("log_max_size_kb", cfg.log_max_size_kb);
-    if (!node["log_max_size_kb"] && node["log_size_kb"]) {
-        read_optional_int("log_size_kb", cfg.log_max_size_kb);
-    }
-    read_optional_int("log_file_count", cfg.log_file_count);
-    if (!node["log_file_count"] && node["log_files"]) {
-        read_optional_int("log_files", cfg.log_file_count);
-    }
-
-    read_optional_string("log_dir", cfg.log_dir);
-    read_optional_string("log_file_name", cfg.log_file_name);
-    if (cfg.log_file_name.empty() && node["log_file"]) {
-        read_optional_string("log_file", cfg.log_file_name);
+void emit_warnings(const std::vector<std::string> &warnings) {
+    for (const auto &w : warnings) {
+        daemon_log_message(daemon_log_level_t::warn, w);
     }
 }
 
-void emit_warnings(const std::vector<std::string> &warnings) {
-    for (const auto &w : warnings) {
-        std::cerr << "[WARN] " << w << std::endl;
+bool path_exists(const std::string &path) {
+    const DWORD attributes = GetFileAttributesW(utf8_to_wide(path).c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES;
+}
+
+bool read_file(const std::string &path, std::string &content, std::string &error) {
+    HANDLE file = CreateFileW(utf8_to_wide(path).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = "Cannot open `" + path + "`: " + std::to_string(GetLastError());
+        return false;
     }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 64LL * 1024 * 1024) {
+        error = "Cannot read size of `" + path + "`";
+        CloseHandle(file);
+        return false;
+    }
+    content.resize(static_cast<std::size_t>(size.QuadPart));
+    DWORD total = 0;
+    while (total < content.size()) {
+        DWORD read = 0;
+        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(content.size() - total, 1024 * 1024));
+        if (!ReadFile(file, &content[total], chunk, &read, nullptr)) {
+            error = "Cannot read `" + path + "`: " + std::to_string(GetLastError());
+            CloseHandle(file);
+            return false;
+        }
+        if (read == 0) break;
+        total += read;
+    }
+    content.resize(total);
+    CloseHandle(file);
+    return true;
+}
+
+std::vector<std::string> current_environment() {
+    std::vector<std::string> result;
+    LPWCH block = GetEnvironmentStringsW();
+    if (block == nullptr) return result;
+    for (LPCWCH item = block; *item != L'\0'; item += wcslen(item) + 1) {
+        if (*item == L'=') continue;
+        result.push_back(wide_to_utf8(item));
+    }
+    FreeEnvironmentStringsW(block);
+    return result;
+}
+
+bool load_environment_sidecar(const std::string &name, const std::string &directory,
+                              std::vector<std::string> &environment, std::string &error) {
+    const std::string base = directory + "\\" + name;
+    if (path_exists(base)) {
+        error = "Legacy environment sidecar `" + base +
+                "` is unsupported; migrate it to the YAML sidecar format";
+        return false;
+    }
+    const std::string path = base + ".yaml";
+    if (!path_exists(path)) {
+        environment = current_environment();
+        return true;
+    }
+    std::string content;
+    if (!read_file(path, content, error)) return false;
+    try {
+        const YAML::Node root = YAML::Load(content);
+        if (!root.IsMap() || !root["schema"] || root["schema"].as<int>() != 1 ||
+            !root["environment"] || !root["environment"].IsSequence()) {
+            error = "Invalid environment sidecar `" + path + "`";
+            return false;
+        }
+        environment.clear();
+        for (const auto &entry : root["environment"])
+            environment.push_back(entry.as<std::string>());
+    } catch (const YAML::Exception &ex) {
+        error = "Invalid environment sidecar `" + path + "`: " + ex.what();
+        return false;
+    }
+    return true;
 }
 
 } // namespace
 
-ConfigLoadResult load_program_configs(const std::string &path) {
+ConfigLoadResult load_program_configs(const std::string &program_config_path,
+                                      const std::string &app_environ_dir) {
     ConfigLoadResult result;
-    YAML::Node root;
-    try {
-        root = YAML::LoadFile(path);
-    } catch (const YAML::Exception &ex) {
-        result.error_message = "Failed to load config `" + path + "`: " + ex.what();
+    if (!recover_program_config_save(program_config_path, app_environ_dir, result.error_message))
+        return result;
+    const DWORD attributes = GetFileAttributesW(utf8_to_wide(program_config_path).c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return result;
+    }
+    std::string content;
+    if (!read_file(program_config_path, content, result.error_message)) return result;
+    if (is_effectively_empty_prog_cfg_yaml(content)) return result;
+    YAML::Node programs;
+    try { programs = YAML::Load(content); }
+    catch (const YAML::Exception &ex) {
+        result.error_message = "Failed to load program config `" + program_config_path + "`: " + ex.what();
         return result;
     }
 
-    auto document = parse_prog_cfg_yaml_document(root);
+    auto document = parse_prog_cfg_yaml_document(programs);
     emit_warnings(document.warnings);
     if (!document.success) {
-        result.error_message = "Config file `" + path + "` invalid: " + document.error;
+        result.error_message = "Program config `" + program_config_path +
+            "` invalid: " + document.error;
         return result;
     }
 
     for (std::size_t index = 0; index < document.programs.size(); ++index) {
-        const auto &node = root[index];
+        const auto &node = programs[index];
         auto base_cfg = std::move(document.programs[index]);
         if (!base_cfg.run_as.empty()) {
             result.error_message = "Program `" + base_cfg.name + "` field `user` is unsupported on Windows";
@@ -120,24 +167,15 @@ ConfigLoadResult load_program_configs(const std::string &path) {
         }
 
         ProgramConfig cfg = make_program_config(base_cfg);
-        std::vector<std::string> platform_warnings;
-        apply_windows_overrides(node, cfg, platform_warnings);
-        emit_warnings(platform_warnings);
-
-        if (cfg.log_file_name.empty()) {
-            cfg.log_file_name = cfg.name.empty() ? "pm_tiny.log" : cfg.name + ".log";
-        }
-        if (cfg.log_max_size_kb <= 0) {
-            cfg.log_max_size_kb = 4096;
-        }
-        if (cfg.log_file_count <= 0) {
-            cfg.log_file_count = 3;
+        if (!load_environment_sidecar(cfg.name, app_environ_dir, cfg.envs, result.error_message)) {
+            result.programs.clear();
+            return result;
         }
 
         result.programs.push_back(std::move(cfg));
     }
 
-    if (result.programs.empty() && root.size() == 0) {
+    if (result.programs.empty() && programs.size() == 0) {
         return result;
     }
     if (!validate_and_order_prog_cfgs(result.programs, result.error_message)) {

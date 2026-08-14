@@ -69,6 +69,12 @@ struct dependency_failure_result {
     std::vector<std::string> blocked;
 };
 
+struct dependency_runtime_entry {
+    std::string name;
+    dependency_runtime_state state = dependency_runtime_state::idle;
+    bool requested = false;
+};
+
 class dependency_runtime {
 public:
     dependency_runtime() = default;
@@ -81,10 +87,15 @@ public:
     dependency_failure_result mark_failed(const std::string &name);
     void mark_starting(const std::string &name);
     void mark_idle(const std::string &name);
+    void mark_pending(const std::string &name);
 
     dependency_runtime_state state(const std::string &name) const;
     std::vector<std::string> blocked_by(const std::string &name) const;
+    std::vector<std::string> waiting_for(const std::string &name) const;
     bool all_terminal() const;
+    std::vector<dependency_runtime_entry> snapshot() const;
+    void migrate(const dependency_graph &graph,
+                 const std::vector<dependency_runtime_entry> &entries);
 
 private:
     bool dependencies_ready(dependency_graph::node_id id) const;

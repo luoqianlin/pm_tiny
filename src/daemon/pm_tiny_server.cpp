@@ -1,37 +1,95 @@
 #include "pm_tiny_server.h"
-#include "log.h"
+#include "time_util.h"
+#include "daemon_log.h"
+#include "signal_util.h"
 #include "globals.h"
 #include "prog_cfg.h"
 #include <termios.h>
 #include <unistd.h>
 #include <algorithm>
+#include <unordered_map>
 #include <sys/prctl.h>
+#include <poll.h>
 #include "android_lmkd.h"
 #include "child_launch_context.h"
 
 namespace pm_tiny {
+
+namespace {
+std::string env_key(const std::string &entry) {
+    const auto separator = entry.find('=');
+    return separator == std::string::npos ? std::string() : entry.substr(0, separator);
+}
+
+std::vector<std::string> effective_environment(const prog_info_t &prog) {
+    std::vector<std::string> result;
+    std::unordered_map<std::string, std::size_t> indices;
+    const auto apply = [&](const std::string &entry) {
+        const auto key = env_key(entry);
+        if (key.empty() || key.compare(0, 8, "PM_TINY_") == 0) return;
+        const auto found = indices.find(key);
+        if (found == indices.end()) {
+            indices[key] = result.size();
+            result.push_back(entry);
+        } else {
+            result[found->second] = entry;
+        }
+    };
+    for (const auto &entry : prog.envs) apply(entry);
+    for (const auto &entry : prog.env_vars) apply(entry);
+    return result;
+}
+
+std::string find_env_value(const std::vector<std::string> &environment, const std::string &key) {
+    for (const auto &entry : environment) {
+        if (env_key(entry) == key) return entry.substr(key.size() + 1);
+    }
+    return {};
+}
+
+std::string resolve_executable(const prog_info_t &prog,
+                               const std::vector<std::string> &environment) {
+    if (prog.executable.find('/') != std::string::npos) return prog.executable;
+    const auto path = find_env_value(environment, "PATH");
+    std::size_t begin = 0;
+    while (begin <= path.size()) {
+        const auto end = path.find(':', begin);
+        const auto directory = path.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        const auto search_directory = directory.empty() ? std::string(".") : directory;
+        const auto base = !search_directory.empty() && search_directory[0] == '/'
+            ? search_directory : prog.work_dir + "/" + search_directory;
+        const auto candidate = base + "/" + prog.executable;
+        if (access(candidate.c_str(), X_OK) == 0) return candidate;
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return {};
+}
+}
 
 bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::string &root) {
     if (!process_tree) process_tree = std::make_shared<process_tree_controller>();
     process_tree_mode requested;
     std::string reason;
     if (!parse_process_tree_mode(mode, requested)) {
-        PM_TINY_LOG_E("invalid pm_tiny_process_tree_mode: %s", mode.c_str());
+        PM_TINY_DLOG_ERROR("invalid pm_tiny_process_tree_mode: %s", mode.c_str());
         return false;
     }
     std::string instance = pm_tiny_lock_file.empty() ? pm_tiny_home_dir : pm_tiny_lock_file;
-    if (!process_tree_controller::enable_subreaper(reason)) {
-        PM_TINY_LOG_E("child-subreaper unavailable, process tree cleanup is degraded: %s", reason.c_str());
+    subreaper_enabled = process_tree_controller::enable_subreaper(reason);
+    subreaper_error = subreaper_enabled ? std::string() : reason;
+    if (!subreaper_enabled) {
+        PM_TINY_DLOG_ERROR("child-subreaper unavailable, process tree cleanup is degraded: %s", reason.c_str());
     }
     if (!process_tree->initialize(requested, root, instance, reason)) {
-        PM_TINY_LOG_E("process tree controller initialization failed: %s", reason.c_str());
+        PM_TINY_DLOG_ERROR("process tree controller initialization failed: %s", reason.c_str());
         return false;
     }
     if (requested == process_tree_mode::auto_detect &&
         process_tree->effective_mode() == process_tree_mode::process_group) {
-        PM_TINY_LOG_E("process tree degraded to process_group: %s", reason.c_str());
+        PM_TINY_DLOG_ERROR("process tree degraded to process_group: %s", reason.c_str());
     }
-    PM_TINY_LOG_I("process tree mode requested=%s effective=%s root=%s",
+    PM_TINY_DLOG_INFO("process tree mode requested=%s effective=%s root=%s",
                   process_tree_mode_name(requested),
                   process_tree_mode_name(process_tree->effective_mode()),
                   process_tree->root().empty() ? "<process-group>" : process_tree->root().c_str());
@@ -57,10 +115,10 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
 
 
     int pm_tiny_server_t::parse_cfg() {
-        parse_cfg(this->pm_tiny_progs);
+        if (parse_cfg(this->pm_tiny_progs) != 0) return -1;
         std::string error_message;
         if (!rebuild_dependency_graph(pm_tiny_progs, error_message)) {
-            PM_TINY_LOG_E("%s", error_message.c_str());
+            PM_TINY_DLOG_ERROR("%s", error_message.c_str());
             return -1;
         }
         return 0;
@@ -69,7 +127,10 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
     std::unique_ptr<reload_config_t>
     pm_tiny_server_t::parse_cfg2() {
         proglist_t pl;
-        parse_cfg(pl);
+        if (parse_cfg(pl) != 0) {
+            return std::make_unique<reload_config_t>(std::move(pl), dependency_graph{}, false,
+                                                     "cannot load program configuration");
+        }
         dependency_graph graph;
         std::string error_message;
         const auto progs = std::vector<prog_ptr_t>(pl.begin(), pl.end());
@@ -86,7 +147,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         dependency_graph graph;
         std::string error_message;
         const bool valid = build_prog_dependency_graph(candidate, graph, error_message);
-        if (!valid) PM_TINY_LOG_E("%s", error_message.c_str());
+        if (!valid) PM_TINY_DLOG_ERROR("%s", error_message.c_str());
         return valid;
     }
 
@@ -100,25 +161,26 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
 
     int pm_tiny_server_t::parse_cfg(proglist_t &progs) const {
         const std::string &cfg_path = this->pm_tiny_prog_cfg_file;
-        auto prog_cfgs = load_prog_cfg(cfg_path,
-                                       this->pm_tiny_app_environ_dir);
+        auto load_result = load_prog_cfg(cfg_path, this->pm_tiny_app_environ_dir);
+        if (!load_result.success) {
+            PM_TINY_DLOG_ERROR("%s", load_result.error.c_str());
+            return -1;
+        }
 
-        for (const auto &prog_cfg: prog_cfgs) {
+        for (const auto &prog_cfg: load_result.programs) {
             auto &app_name = prog_cfg.name;
             const auto iter = std::find_if(progs.begin(), progs.end(),
                                            [&app_name](const prog_ptr_t &prog) {
                                                return prog->name == app_name;
                                            });
             if (iter != progs.end()) {
-                PM_TINY_LOG_I("name %s already exists ignore", app_name.c_str());
+                PM_TINY_DLOG_INFO("name %s already exists ignore", app_name.c_str());
                 continue;
             }
             std::vector<std::string> envs = prog_cfg.envs;
-            int kill_timeout_s = prog_cfg.kill_timeout_s;
-            std::string run_as = prog_cfg.run_as;
-            auto prog_info = create_prog(app_name, prog_cfg.cwd, prog_cfg.command,
-                                         envs, kill_timeout_s, run_as, prog_cfg.pty);
+            auto prog_info = create_prog(prog_cfg, envs);
             if (prog_info) {
+                prog_info->config_source = "file";
                 prog_info->depends_on = prog_cfg.depends_on;
                 prog_info->start_timeout = prog_cfg.start_timeout;
                 prog_info->failure_action = prog_cfg.failure_action;
@@ -137,76 +199,84 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         return 0;
     }
 
-    std::unique_ptr<prog_info_t> pm_tiny_server_t::create_prog(const std::string &app_name,
-                                             const std::string &cwd,
-                                             const std::string &command,
-                                             const std::vector<std::string> &envs,
-                                             int kill_timeout_sec, const std::string &run_as,
-                                             bool use_pty) const {
-        const std::string &app_log_dir = this->pm_tiny_app_log_dir;
+    std::unique_ptr<prog_info_t> pm_tiny_server_t::create_prog(const prog_cfg_t &config,
+                                                               const std::vector<std::string> &envs) const {
+        const std::string &app_name = config.name;
+        const std::string app_log_dir = config.log_dir.empty() ? this->pm_tiny_app_log_dir : config.log_dir;
         auto prog_info = std::make_unique<pm_tiny::prog_info_t>();
         prog_info->tree_controller = this->process_tree;
         prog_info->rpipefd[0] = prog_info->rpipefd[1] = -1;
-        prog_info->logfile_fd[0] = prog_info->logfile_fd[1] = -1;
-        prog_info->use_pty = use_pty;
-        if (!use_pty) {
-            prog_info->logfile[0] = app_log_dir;
-            prog_info->logfile[0] += ("/" + app_name + "_stdout.log");
-            prog_info->logfile[1] = app_log_dir;
-            prog_info->logfile[1] += ("/" + app_name + "_stderr.log");
-        } else {
-            prog_info->logfile[0] = app_log_dir;
-            prog_info->logfile[0] += ("/" + app_name + ".log");
-            prog_info->logfile[1] = "";
+        prog_info->use_pty = config.pty;
+        prog_info->log_mode = config.log_mode;
+        prog_info->log_dir = config.log_dir;
+        prog_info->log_file_name = config.log_file_name;
+        prog_info->log_max_size_kb = config.log_max_size_kb;
+        prog_info->log_archive_count = config.log_archive_count;
+        const auto names = derive_log_paths(app_log_dir, app_name, config.log_mode, config.log_file_name);
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            prog_info->logfile[i] = names[i];
         }
         prog_info->name = app_name;
-        prog_info->work_dir = cwd;
+        prog_info->work_dir = config.cwd;
+        prog_info->executable = config.executable;
+        prog_info->args = config.args;
         prog_info->dead_count = 0;
         prog_info->last_dead_time_ms = 0;
-        prog_info->args = mgr::utils::split(command, {' ', '\t'});
-        prog_info->args.erase(
-                std::remove_if(prog_info->args.begin(), prog_info->args.end(),
-                               [](const std::string &arg) {
-                                   return mgr::utils::trim_copy(arg).empty();
-                               }), prog_info->args.end());
         prog_info->instance.pid = -1;
         prog_info->envs = envs;
         if (prog_info->work_dir.empty()) {
-            logger->info("%s work dir is empty ignore", app_name.c_str());
+            PM_TINY_DLOG_INFO("%s work dir is empty ignore", app_name.c_str());
             return nullptr;
         }
-        if (prog_info->args.empty()) {
-            logger->info("%s args is empty ignore", app_name.c_str());
+        if (prog_info->executable.empty()) {
+            PM_TINY_DLOG_INFO("%s executable is empty ignore", app_name.c_str());
             return nullptr;
         }
-        if (kill_timeout_sec < 1) {
-            kill_timeout_sec = 3;
-        }
-        prog_info->kill_timeout_sec = kill_timeout_sec;
-        prog_info->run_as = run_as;
+        prog_info->kill_timeout_sec = config.kill_timeout_s;
+        prog_info->run_as = config.run_as;
         return prog_info;
     }
 
     int pm_tiny_server_t::start_and_add_prog(const prog_ptr_t &prog) {
+        const auto runtime_snapshot = dependency_runtime_.snapshot();
         proglist_t candidate = pm_tiny_progs;
         candidate.push_back(prog);
         dependency_graph graph;
         std::string error_message;
         const auto progs = std::vector<prog_ptr_t>(candidate.begin(), candidate.end());
         if (!build_prog_dependency_graph(progs, graph, error_message)) {
-            PM_TINY_LOG_E("%s", error_message.c_str());
+            PM_TINY_DLOG_ERROR("%s", error_message.c_str());
             return -1;
+        }
+        if (prog->executable.find('/') != std::string::npos) {
+            struct stat executable_stat{};
+            std::string executable_path = prog->executable;
+            if (executable_path[0] != '/') executable_path = prog->work_dir + "/" + executable_path;
+            if (stat(executable_path.c_str(), &executable_stat) != 0 || !S_ISREG(executable_stat.st_mode) ||
+                access(executable_path.c_str(), X_OK) != 0) {
+                PM_TINY_DLOG_ERROR("executable preflight failed: %s", executable_path.c_str());
+                errno = ENOENT;
+                return -1;
+            }
         }
         pm_tiny_progs.push_back(prog);
         dependency_graph_ = std::move(graph);
-        dependency_runtime_.reset(dependency_graph_);
-        for (const auto existing : pm_tiny_progs) {
-            if (existing != prog && existing->state == PM_TINY_PROG_STATE_RUNING)
-                dependency_runtime_.mark_ready(existing->name);
-        }
+        dependency_runtime_.migrate(dependency_graph_, runtime_snapshot);
         const auto names = dependency_runtime_.request_closure(prog->name);
         auto start_progs = progs_from_names(names);
-        spawn0(start_progs);
+        const auto failures = spawn0(start_progs);
+        if (!failures.empty()) {
+            pm_tiny_progs.remove(prog);
+            const auto remaining = std::vector<prog_ptr_t>(pm_tiny_progs.begin(), pm_tiny_progs.end());
+            std::string rebuild_error;
+            dependency_graph rebuilt;
+            if (build_prog_dependency_graph(remaining, rebuilt, rebuild_error)) {
+                dependency_graph_ = std::move(rebuilt);
+                dependency_runtime_.migrate(dependency_graph_, runtime_snapshot);
+            }
+            errno = EIO;
+            return -1;
+        }
         return 0;
     }
 
@@ -279,20 +349,14 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
     }
 
     int pm_tiny_server_t::save_proc_to_cfg() {
-        //name:cwd:command
         const std::string &cfg_path = this->pm_tiny_prog_cfg_file;
         std::vector<prog_cfg_t> prog_cfgs;
 
         std::for_each(this->pm_tiny_progs.begin(), this->pm_tiny_progs.end(),
                       [&prog_cfgs](const prog_ptr_t &p) {
-                          std::string command = std::accumulate(p->args.begin(), p->args.end(),
-                                                                std::string(""),
-                                                                [](const std::string &s1, const std::string &s2) {
-                                                                    return s1 + (s2 + " ");
-                                                                });
-                          mgr::utils::trim(command);
                           prog_cfg_t prog_cfg;
-                          prog_cfg.command = command;
+                          prog_cfg.executable = p->executable;
+                          prog_cfg.args = p->args;
                           prog_cfg.cwd = p->work_dir;
                           prog_cfg.name = p->name;
                           prog_cfg.kill_timeout_s = p->kill_timeout_sec;
@@ -315,6 +379,52 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
 
                       });
         return save_prog_cfg(prog_cfgs, cfg_path, this->pm_tiny_app_environ_dir);
+    }
+
+    bool pm_tiny_server_t::begin_save_proc_to_cfg() {
+        const std::string cfg_path = this->pm_tiny_prog_cfg_file;
+        const std::string env_path = this->pm_tiny_app_environ_dir;
+        std::vector<prog_cfg_t> prog_cfgs;
+        prog_cfgs.reserve(pm_tiny_progs.size());
+        for (const auto &p : pm_tiny_progs) {
+            prog_cfg_t cfg;
+            cfg.executable = p->executable;
+            cfg.args = p->args;
+            cfg.cwd = p->work_dir;
+            cfg.name = p->name;
+            cfg.kill_timeout_s = p->kill_timeout_sec;
+            cfg.run_as = p->run_as;
+            cfg.envs = p->envs;
+            cfg.depends_on = p->depends_on;
+            cfg.daemon = p->daemon;
+            cfg.start_timeout = p->start_timeout;
+            cfg.failure_action = p->failure_action;
+            cfg.heartbeat_timeout = p->heartbeat_timeout;
+            cfg.env_vars = p->env_vars;
+            cfg.oom_score_adj = p->oom_score_adj;
+            cfg.pty = p->use_pty;
+            cfg.restart_delay_ms = p->restart_config.delay_ms;
+            cfg.restart_max_delay_ms = p->restart_config.max_delay_ms;
+            cfg.restart_window_ms = p->restart_config.window_ms;
+            cfg.restart_max_attempts = p->restart_config.max_attempts;
+            cfg.restart_reset_after_ms = p->restart_config.reset_after_ms;
+            prog_cfgs.push_back(std::move(cfg));
+        }
+        return persistence.submit([prog_cfgs = std::move(prog_cfgs), cfg_path, env_path]() {
+            return save_prog_cfg(prog_cfgs, cfg_path, env_path);
+        });
+    }
+
+    bool pm_tiny_server_t::poll_save_proc_to_cfg(int &result) {
+        return persistence.poll(result);
+    }
+
+    bool pm_tiny_server_t::persistence_busy() const {
+        return persistence.busy();
+    }
+
+    void pm_tiny_server_t::wait_for_persistence() {
+        persistence.wait();
     }
 
     void pm_tiny_server_t::restart_startfailed() {
@@ -347,7 +457,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             }
         }
         ss<<"]";
-        PM_TINY_LOG_D("start:%s",ss.str().c_str());
+        PM_TINY_DLOG_DEBUG("start:%s",ss.str().c_str());
         return fail_progs;
     }
 
@@ -355,7 +465,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         auto old_state = prog_->state;
         prog_->async_kill_prog();
         if (old_state == PM_TINY_PROG_STATE_STARTING) {
-            PM_TINY_LOG_D("current prog name:%s,trigger DAG next",prog_->name.c_str());
+            PM_TINY_DLOG_DEBUG("current prog name:%s,trigger DAG next",prog_->name.c_str());
             prog_->enqueue_after_termination(
                     [prog_](pm_tiny_server_t &pm_tiny_server) {
                         if (pm_tiny_server.is_exiting()) {
@@ -377,7 +487,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         if (!info.empty()) {
             info.erase(info.end() - 1);
         }
-        PM_TINY_LOG_D("trigger node:%s", info.c_str());
+        PM_TINY_DLOG_DEBUG("trigger node:%s", info.c_str());
         std::vector<std::string> ready_names;
         for (auto p : started_progs) {
             const auto unlocked = dependency_runtime_.mark_ready(p->name);
@@ -385,7 +495,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         }
         auto start_progs = progs_from_names(ready_names);
         if (start_progs.empty()) {
-            PM_TINY_LOG_D("DAG next start empty");
+            PM_TINY_DLOG_DEBUG("DAG next start empty");
             return;
         }
         this->spawn0(start_progs);
@@ -411,15 +521,23 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         pm_tiny::child_launch_context launch;
         if (launch.prepare(prog.use_pty) == -1) {
             tmp_errno = errno;
-            logger->syscall_errorlog(prog.use_pty ? "create pty" : "pipe");
+            PM_TINY_DLOG_ERROR_ERRNO("%s", prog.use_pty ? "create pty" : "pipe");
             errno = tmp_errno;
             return -1;
         }
         sigset_t omask;
         /* Careful: don't be affected by a signal in vforked child */
         mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK, &omask);
+        const auto environment = effective_environment(prog);
+        const auto executable = resolve_executable(prog, environment);
+        if (executable.empty()) {
+            errno = ENOENT;
+            PM_TINY_DLOG_ERROR("resolve executable `%s` using target PATH failed", prog.executable.c_str());
+            launch.close_all();
+            return -1;
+        }
         std::vector<char *> envp;
-        envp.reserve(prog.envs.size() + prog.env_vars.size() + 5);
+        envp.reserve(environment.size() + 5);
         std::string app_id_env = PM_TINY_APP_NAME "=";
         app_id_env += prog.name;
         std::string home_dir_env = PM_TINY_HOME "=";
@@ -440,7 +558,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         if (pid < 0) {
             tmp_errno = errno;
             sigprocmask(SIG_SETMASK, &omask, nullptr);
-            logger->syscall_errorlog("fork");
+            PM_TINY_DLOG_ERROR_ERRNO("fork");
             launch.close_all();
             errno = tmp_errno;
             return -1;
@@ -451,7 +569,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             prog.instance.begin(pid);
             std::string tree_reason;
             if (!this->process_tree->attach(pid, prog.instance.tree, tree_reason)) {
-                PM_TINY_LOG_E("attach `%s` to process tree failed: %s", prog.name.c_str(), tree_reason.c_str());
+                PM_TINY_DLOG_ERROR("attach `%s` to process tree failed: %s", prog.name.c_str(), tree_reason.c_str());
                 launch.close_all();
                 kill(pid, SIGKILL);
                 pm_tiny::safe_waitpid(pid, nullptr, 0);
@@ -461,8 +579,11 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             }
             if (prog.instance.tree.mode == process_tree_mode::process_group &&
                 this->process_tree->effective_mode() == process_tree_mode::cgroup) {
-                PM_TINY_LOG_I("`%s` process tree degraded to process_group: %s", prog.name.c_str(), tree_reason.c_str());
+                PM_TINY_DLOG_INFO("`%s` process tree degraded to process_group: %s", prog.name.c_str(), tree_reason.c_str());
             }
+            prog.process_tree_backend = process_tree_mode_name(prog.instance.tree.mode);
+            prog.process_tree_degraded = !tree_reason.empty();
+            prog.process_tree_degradation_reason = tree_reason;
             ssize_t gate_write = pm_tiny::safe_write(launch.gate[1], "1", 1);
             close(launch.gate[1]); launch.gate[1] = -1;
             if (gate_write != 1) {
@@ -474,14 +595,37 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 return -1;
             }
             int child_errno = 0;
-            ssize_t exec_status = pm_tiny::safe_read(launch.exec_status[0], &child_errno, sizeof(child_errno));
+            pollfd exec_poll{launch.exec_status[0], POLLIN | POLLHUP, 0};
+            int poll_result;
+            do { poll_result = poll(&exec_poll, 1, 10000); } while (poll_result < 0 && errno == EINTR);
+            if (poll_result == 0) {
+                kill(pid, SIGKILL);
+                pm_tiny::safe_waitpid(pid, nullptr, 0);
+                this->process_tree->cleanup(prog.instance.tree);
+                prog.instance.reset_failed_start();
+                close(launch.exec_status[0]); launch.exec_status[0] = -1;
+                errno = ETIMEDOUT;
+                PM_TINY_DLOG_ERROR("`%s` exec handshake timed out after 10 seconds", prog.name.c_str());
+                return -1;
+            }
+            ssize_t exec_status = poll_result < 0 ? -1 :
+                pm_tiny::safe_read(launch.exec_status[0], &child_errno, sizeof(child_errno));
             close(launch.exec_status[0]); launch.exec_status[0] = -1;
+            if (exec_status < 0) {
+                const int read_error = errno;
+                kill(pid, SIGKILL);
+                pm_tiny::safe_waitpid(pid, nullptr, 0);
+                this->process_tree->cleanup(prog.instance.tree);
+                prog.instance.reset_failed_start();
+                errno = read_error;
+                return -1;
+            }
             if (exec_status > 0) {
                 pm_tiny::safe_waitpid(pid, nullptr, 0);
                 this->process_tree->cleanup(prog.instance.tree);
                 prog.instance.reset_failed_start();
                 errno = child_errno;
-                PM_TINY_LOG_E_SYS("`%s` startup fail", prog.name.c_str());
+                PM_TINY_DLOG_ERROR_ERRNO("`%s` startup fail", prog.name.c_str());
                 return -1;
             }
             if (!prog.use_pty) {
@@ -490,7 +634,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 prog.rpipefd[1] = stderr_fd;
                 int rc = pm_tiny::set_nonblock(prog.rpipefd[0]);
                 if (rc == -1) {
-                    logger->syscall_errorlog("fcntl");
+                    PM_TINY_DLOG_ERROR_ERRNO("fcntl");
                 }
             } else {
                 int unused_stderr = -1;
@@ -500,7 +644,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             if (lmkdFd) {
                 lmk_procprio(this->lmkdFd.fd_, pid, get_uid_by_pid(pid), prog.oom_score_adj);
             }
-            PM_TINY_LOG_I("startup `%s` pid:%d\n", prog.name.c_str(), pid);
+            PM_TINY_DLOG_INFO("startup `%s` pid:%d\n", prog.name.c_str(), pid);
         } else {
             launch.close_child_ends();
             const pid_t expected_parent = getppid();
@@ -538,18 +682,13 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             int rc;
 //            rc = pm_tiny::set_sigaction(SIGPIPE, SIG_DFL);
 //            if (rc == -1) {
-//                logger->syscall_errorlog("sigaction SIGPIPE");
 //            }
             if (!prog.run_as.empty()) {
                 passwd_t passwd;
                 rc = get_uid_from_username(prog.run_as.c_str(), passwd);
-                if (rc == -1) {
-                    child_fail(errno);
-                }
+                if (rc == -1) child_fail(errno);
                 rc = setreuid(passwd.pw_uid, passwd.pw_uid);
-                if (rc == -1) {
-                    child_fail(errno);
-                }
+                if (rc == -1) child_fail(errno);
             }
             if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) child_fail(errno);
             if (getppid() != expected_parent) child_fail(EPIPE);
@@ -559,21 +698,14 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                     child_fail(errno);
                 }
             }
-            char *args[80] = {nullptr};
-            for (int i = 0; i < static_cast<int>(prog.args.size())
-                            && i < static_cast<int>(sizeof(args) / sizeof(args[0])); i++) {
-                args[i] = (char *) prog.args[i].c_str();
-            }
-            auto add2envp = [&](const std::string &env) {
-                if (env.rfind("PM_TINY_", 0) == 0) {
-                    return;
-                }
-                envp.push_back(const_cast<char *>(env.c_str()));
-            };
-            std::for_each(prog.env_vars.begin(), prog.env_vars.end(), add2envp);
-            std::for_each(prog.envs.begin(), prog.envs.end(), add2envp);
+            std::vector<char *> argv;
+            argv.reserve(prog.args.size() + 2);
+            argv.push_back(const_cast<char *>(prog.executable.c_str()));
+            for (const auto &arg : prog.args) argv.push_back(const_cast<char *>(arg.c_str()));
+            argv.push_back(nullptr);
+            for (const auto &env : environment) envp.push_back(const_cast<char *>(env.c_str()));
             envp.push_back(nullptr);
-            execvpe(args[0], args, envp.data());
+            execve(executable.c_str(), argv.data(), envp.data());
             child_fail(errno);
         }
 
@@ -614,7 +746,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         do {
             DIR *procdir = opendir(procdir_path);
             if (procdir == nullptr) {
-                logger->syscall_errorlog("cannot open %s dir", procdir_path);
+                PM_TINY_DLOG_ERROR_ERRNO("cannot open %s dir", procdir_path);
                 break;
             }
             while (true) {
@@ -622,7 +754,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 struct dirent *d = readdir(procdir);
                 if (d == nullptr) {
                     if (errno != 0) {
-                        logger->syscall_errorlog("readdir");
+                        PM_TINY_DLOG_ERROR_ERRNO("readdir");
                     }
                     break;
                 }
@@ -650,13 +782,12 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                     };
                     if (is_equal(procinfo.cmdline, prog.args)) {
                         auto cmd = mgr::utils::join(procinfo.cmdline);
-                        PM_TINY_LOG_I("found detach pid:%d exe:%s cmdline:%s comm:%s",
+                        PM_TINY_DLOG_INFO("found detach pid:%d exe:%s cmdline:%s comm:%s",
                                       pid, procinfo.exe_path.c_str(),
                                       cmd.c_str(), procinfo.comm.c_str());
                         pm_tiny::safe_kill_process(pid, prog.kill_timeout_sec);
                     }
                 } else {
-//                logger->syscall_errorlog("get_exe_path");
                 }
             }
             closedir(procdir);
@@ -713,7 +844,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         prog = nullptr;
         std::string error_message;
         if (!rebuild_dependency_graph(pm_tiny_progs, error_message))
-            PM_TINY_LOG_E("failed to rebuild dependency graph after delete: %s", error_message.c_str());
+            PM_TINY_DLOG_ERROR("failed to rebuild dependency graph after delete: %s", error_message.c_str());
     }
 
     void pm_tiny_server_t::flag_startup_fail(prog_ptr_t &prog) {
@@ -727,7 +858,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
 
     void pm_tiny_server_t::show_prog_depends_info() const {
         if (this->pm_tiny_progs.empty()) {
-            PM_TINY_LOG_D("progs empty");
+            PM_TINY_DLOG_DEBUG("progs empty");
         } else {
             std::stringstream ss;
             for (const auto id : dependency_graph_.topological_order()) {
@@ -739,7 +870,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 }
                 ss << std::endl;
             }
-            PM_TINY_LOG_I("depends:\n%s", ss.str().c_str());
+            PM_TINY_DLOG_INFO("depends:\n%s", ss.str().c_str());
         }
     }
 
@@ -779,7 +910,6 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         bool find = false;
         if (p->instance.pid != -1 || !p->is_tree_empty()) {
             find = true;
-//        logger->debug("kill %s(%d)", p->name.c_str(), p->pid);
             p->signal_tree(signo);
         }
         return find;
@@ -792,7 +922,6 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             int wstatus;
             int rc = pm_tiny::safe_waitpid(p->instance.pid, &wstatus, options);
             if (rc == p->instance.pid) {
-//          logger->debug("waitpid %s(%d)", p->name.c_str(), p->pid);
                 p->last_wstatus = wstatus;
                 p->instance.pid = -1;
                 p->state = PM_TINY_PROG_STATE_STOPED;
@@ -835,7 +964,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 return !find;
             });
             if (find) {
-                pm_tiny::logger->debug("force kill");
+                PM_TINY_DLOG_DEBUG("force kill");
                 xx_kill(progs, SIGKILL);
                 pm_tiny::sleep_waitfor(1, [&]() {
                     find = xx_wait(progs, 0);

@@ -250,6 +250,14 @@ void dependency_runtime::mark_idle(const std::string &name) {
     }
 }
 
+void dependency_runtime::mark_pending(const std::string &name) {
+    const auto id = graph_ ? graph_->find(name) : dependency_graph::npos;
+    if (id != dependency_graph::npos) {
+        requested_[id] = true;
+        states_[id] = dependency_runtime_state::pending;
+    }
+}
+
 dependency_runtime_state dependency_runtime::state(const std::string &name) const {
     const auto id = graph_ ? graph_->find(name) : dependency_graph::npos;
     return id == dependency_graph::npos ? dependency_runtime_state::idle : states_[id];
@@ -277,12 +285,54 @@ std::vector<std::string> dependency_runtime::blocked_by(const std::string &name)
     return result;
 }
 
+std::vector<std::string> dependency_runtime::waiting_for(const std::string &name) const {
+    std::vector<std::string> result;
+    const auto id = graph_ ? graph_->find(name) : dependency_graph::npos;
+    if (id == dependency_graph::npos) return result;
+    std::vector<bool> visited(graph_->size(), false);
+    std::function<void(dependency_graph::node_id)> visit = [&](dependency_graph::node_id current) {
+        for (const auto dependency : graph_->dependencies(current)) {
+            if (visited[dependency]) continue;
+            visited[dependency] = true;
+            if (states_[dependency] != dependency_runtime_state::ready)
+                result.push_back(graph_->name(dependency));
+            visit(dependency);
+        }
+    };
+    visit(id);
+    std::sort(result.begin(), result.end(), [&](const std::string &left, const std::string &right) {
+        return graph_->find(left) < graph_->find(right);
+    });
+    return result;
+}
+
 bool dependency_runtime::all_terminal() const {
     for (std::size_t i = 0; i < states_.size(); ++i) {
         if (requested_[i] && (states_[i] == dependency_runtime_state::pending ||
                               states_[i] == dependency_runtime_state::starting)) return false;
     }
     return true;
+}
+
+std::vector<dependency_runtime_entry> dependency_runtime::snapshot() const {
+    std::vector<dependency_runtime_entry> result;
+    if (!graph_) return result;
+    result.reserve(graph_->size());
+    for (std::size_t i = 0; i < graph_->size(); ++i) {
+        result.push_back({graph_->name(i), states_[i], requested_[i]});
+    }
+    return result;
+}
+
+void dependency_runtime::migrate(const dependency_graph &graph,
+                                 const std::vector<dependency_runtime_entry> &entries) {
+    reset(graph);
+    for (const auto &entry : entries) {
+        const auto id = graph.find(entry.name);
+        if (id == dependency_graph::npos) continue;
+        states_[id] = entry.state;
+        requested_[id] = entry.requested;
+    }
 }
 
 } // namespace pm_tiny

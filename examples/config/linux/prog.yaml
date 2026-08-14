@@ -1,0 +1,36 @@
+- name: database
+  cwd: /opt/pm_tiny/apps
+  executable: ./database
+  args: []
+  env_vars:
+    - DATA_DIR=/var/lib/pm_tiny/database
+  kill_timeout_s: 5
+  depends_on: []
+  start_timeout: 10
+  failure_action: restart
+  daemon: true
+  pty: false
+  heartbeat_timeout: 30
+  log_mode: split
+  log_max_size_kb: 4096
+  log_archive_count: 3
+
+- name: api
+  cwd: /opt/pm_tiny/apps
+  executable: ./api
+  args:
+    - --listen
+    - 0.0.0.0:8080
+  env_vars:
+    - PORT=8080
+  kill_timeout_s: 5
+  depends_on:
+    - database
+  start_timeout: 10
+  failure_action: restart
+  daemon: true
+  pty: false
+  heartbeat_timeout: 30
+  log_mode: split
+  log_max_size_kb: 4096
+  log_archive_count: 3

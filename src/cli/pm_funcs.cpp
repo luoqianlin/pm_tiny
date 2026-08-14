@@ -13,10 +13,14 @@
 #include "pm_tiny_enum.h"
 #include "pm_tiny.h"
 #include "ANSI_color.h"
-#include "log.h"
+#include "daemon_log.h"
 #include "string_utils.h"
 #include "process_list.h"
 #include "process_list_renderer.h"
+#include "daemon_info.h"
+#include "daemon_info_renderer.h"
+#include "inspect_renderer.h"
+#include "runtime_snapshot.h"
 #include "dependency_graph_renderer.h"
 #include "cli_command.h"
 
@@ -101,7 +105,7 @@ namespace pm_funcs {
     }
 
 
-    void inspect_proc(pm_tiny::session_t &session, const std::string &app_name) {
+    bool inspect_proc(pm_tiny::session_t &session, const std::string &app_name) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::inspect)));
@@ -115,15 +119,36 @@ namespace pm_funcs {
             ifs >> msg;
             if (code != 0) {
                 show_msg(code, msg);
-                return;
+                return false;
             }
-            progcfg_t progcfg;
-            progcfg.read(ifs);
-            progcfg.show();
+            const auto snapshot = pm_tiny::read_inspect_snapshot(ifs);
+            std::cout << pm_tiny::cli::render_inspect_snapshot(snapshot);
+            return true;
+        }
+        return false;
+    }
+
+    bool display_daemon_info(pm_tiny::session_t &session, bool json) {
+        auto f = std::make_unique<pm_tiny::frame_t>();
+        f->push_back(static_cast<std::uint8_t>(
+            pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::info)));
+        auto response = request(session, f);
+        if (!response) return false;
+        try {
+            pm_tiny::iframe_stream stream(*response);
+            std::int32_t status = -1;
+            std::string message;
+            stream >> status >> message;
+            if (status != 0) { show_msg(status, message); return false; }
+            std::cout << pm_tiny::cli::render_daemon_info(pm_tiny::read_daemon_info(stream), json);
+            return true;
+        } catch (const std::exception &error) {
+            fprintf(stderr, "Invalid daemon-info response: %s\n", error.what());
+            return false;
         }
     }
 
-    void display_proc_infos(pm_tiny::session_t &session,
+    bool display_proc_infos(pm_tiny::session_t &session,
                             const pm_tiny::cli::list_render_options &options) {
         auto effective_options = options;
         if (effective_options.terminal_width == 0) {
@@ -136,7 +161,7 @@ namespace pm_funcs {
         auto rf = request(session, f);
         if(session.is_close()){
             printf(PM_TINY_ANSI_COLOR_RED "Connection closed." PM_TINY_ANSI_COLOR_REST "\n");
-            return;
+            return false;
         }
         if (rf) {
             try {
@@ -144,15 +169,18 @@ namespace pm_funcs {
                 int code = 0;
                 std::string msg;
                 ifs >> code >> msg;
-                if (code != 0) { show_msg(code, msg); return; }
+                if (code != 0) { show_msg(code, msg); return false; }
                 const auto entries = pm_tiny::read_process_list(ifs);
                 std::cout << pm_tiny::cli::render_process_list(entries, effective_options);
+                return true;
             } catch (const std::exception &error) {
                 fprintf(stderr, "Invalid process-list response: %s\n", error.what());
+                return false;
             }
         } else if (!pm_is_stop) {
             printf("no data read\n");
         }
+        return false;
     }
 
     bool display_dependency_graph(pm_tiny::session_t &session,
@@ -186,7 +214,7 @@ namespace pm_funcs {
         }
     }
 
-    void stop_proc(pm_tiny::session_t &session, const std::string &app_name) {
+    bool stop_proc(pm_tiny::session_t &session, const std::string &app_name) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::stop)));
@@ -199,113 +227,51 @@ namespace pm_funcs {
             ifs >> code;
             ifs >> msg;
             show_msg(code, msg);
-            display_proc_infos(session);
+            if (code == 0) display_proc_infos(session);
+            return code == 0;
         }
+        return false;
     }
 
 
-    void start_proc(pm_tiny::session_t &session,
-                    const progcfg_t &prog_cfg, bool show_log) {
-        std::vector<std::string> args;
-        mgr::utils::split(prog_cfg.command, {' ', '\t'}, std::back_inserter(args));
-        std::for_each(args.begin(), args.end(), mgr::utils::trim);
-        args.erase(std::remove_if(args.begin(), args.end(),
-                                  [](const std::string &x) { return x.empty(); }), args.end());
-        if (args.empty()) {
-            fprintf(stderr, "app name is required\n");
-            return;
-        }
-        auto exe_path = args[0];
-        char app_realpath[PATH_MAX];
-        int local_resolved = 0;
-        if (realpath(exe_path.c_str(), app_realpath) != nullptr) {
-            struct stat sb{};
-            if (stat(app_realpath, &sb) == 0
-                && (S_ISREG(sb.st_mode) && (sb.st_mode & S_IXUSR))) {
-                exe_path = app_realpath;
-                args[0] = exe_path;
-                local_resolved = 1;
-            }
-        }
-        std::string command = std::accumulate(args.begin(), args.end(), std::string(""),
-                                              [](const std::string &s1, const std::string &s2) {
-                                                  return s1 + (s2 + " ");
-                                              });
-        mgr::utils::trim(command);
-        std::string filename = exe_path;
-        std::string ext_name;
-        auto slash_idx = exe_path.rfind('/');
-        if (slash_idx != std::string::npos) {
-            filename = exe_path.substr(slash_idx + 1);
-        }
-        std::string name = filename;
-        auto dot_idx = filename.rfind('.');
-        if (dot_idx != std::string::npos) {
-            name = filename.substr(0, dot_idx);
-            ext_name = filename.substr(dot_idx + 1);
-        }
-//name:cwd:command local_resolved envp
+    bool start_proc(pm_tiny::session_t &session, const pm_tiny::start_request &start_request) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::start)));
-        if (prog_cfg.name.empty()) {
-            pm_tiny::fappend_value(*f, name);
-        } else {
-            pm_tiny::fappend_value(*f, prog_cfg.name);
-        }
-        char cwd[PATH_MAX];
-        getcwd(cwd, sizeof(cwd));
-        if (command.find(cwd) == 0 && strcmp(cwd, "/") != 0) {
-            command = "." + command.substr(strlen(cwd));
-        }
-        pm_tiny::fappend_value(*f, cwd);
-        pm_tiny::fappend_value(*f, command);
-        pm_tiny::fappend_value(*f, local_resolved);
-        int env_num = 0;
-        for (char **env = ::environ; *env != nullptr; env++) {
-            env_num++;
-        }
-        pm_tiny::fappend_value(*f, env_num);
-        for (char **env = ::environ; *env != nullptr; env++) {
-            char *thisEnv = *env;
-            pm_tiny::fappend_value(*f, thisEnv);
-        }
-        pm_tiny::fappend_value(*f, prog_cfg.kill_timeout_sec);
-        pm_tiny::fappend_value(*f, prog_cfg.run_as);
-        pm_tiny::fappend_value<int>(*f, show_log ? 1 : 0);
-        pm_tiny::fappend_value(*f, static_cast<int>(prog_cfg.depends_on.size()));
-        for (const auto &dep: prog_cfg.depends_on) {
-            pm_tiny::fappend_value(*f, dep);
-        }
-        pm_tiny::fappend_value(*f, prog_cfg.start_timeout);
-        pm_tiny::fappend_value(*f, static_cast<pm_tiny::failure_action_underlying_t>(prog_cfg.failure_action));
-        pm_tiny::fappend_value(*f, prog_cfg.daemon);
-        pm_tiny::fappend_value(*f, prog_cfg.heartbeat_timeout);
-        pm_tiny::fappend_value(*f, prog_cfg.oom_score_adj);
-        pm_tiny::fappend_value(*f, static_cast<int>(prog_cfg.env_vars.size()));
-        std::for_each(prog_cfg.env_vars.begin(), prog_cfg.env_vars.end(),
-                      [&](const auto &env_var) {
-                          pm_tiny::fappend_value(*f, env_var);
-                      });
-        pm_tiny::fappend_value<int>(*f, prog_cfg.pty ? 1 : 0);
+        std::vector<std::uint8_t> payload;
+        pm_tiny::append_start_request(payload, start_request);
+        f->insert(f->end(), payload.begin(), payload.end());
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            if (code != 1) {
-                show_msg(code, msg);
-                display_proc_infos(session);
-            } else {
-                loop_read_show_process_log(session);
-            }
+        if (!rf) return false;
+        pm_tiny::iframe_stream ifs(*rf);
+        int code = 0;
+        std::string msg;
+        ifs >> code >> msg;
+        if (code != 0) {
+            show_msg(code, msg);
+            return false;
         }
+        const auto response = pm_tiny::read_start_response(ifs.remaining_frame());
+        if (response.result == pm_tiny::start_result::started) {
+            std::printf("started `%s` pid=%lld%s\n", start_request.name.c_str(),
+                        static_cast<long long>(response.pid),
+                        start_request.mode == pm_tiny::start_mode::create ? "; run `pm save` to persist" : "");
+        } else if (response.result == pm_tiny::start_result::waiting) {
+            std::printf("waiting `%s`", start_request.name.c_str());
+            if (!response.blocked_by.empty()) std::printf(" for: %s", mgr::utils::join(response.blocked_by, ",").c_str());
+            std::printf("\n");
+        } else {
+            std::fprintf(stderr, "blocked `%s` by: %s\n", start_request.name.c_str(),
+                         mgr::utils::join(response.blocked_by, ",").c_str());
+            return false;
+        }
+        if (start_request.show_log && response.result != pm_tiny::start_result::blocked)
+            return loop_read_show_process_log(session);
+        return true;
     }
 
 
-    void save_proc(pm_tiny::session_t &session) {
+    bool save_proc(pm_tiny::session_t &session) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::save)));
@@ -318,11 +284,13 @@ namespace pm_funcs {
             ifs >> code;
             ifs >> msg;
             show_msg(code, msg);
+            return code == 0;
         }
+        return false;
     }
 
 
-    void delete_prog(pm_tiny::session_t &session, const std::string &app_name) {
+    bool delete_prog(pm_tiny::session_t &session, const std::string &app_name) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::remove)));
@@ -335,12 +303,14 @@ namespace pm_funcs {
             ifs >> code;
             ifs >> msg;
             show_msg(code, msg);
-            display_proc_infos(session);
+            if (code == 0) display_proc_infos(session);
+            return code == 0;
         }
+        return false;
     }
 
 
-    void restart_prog(pm_tiny::session_t &session, const std::string &app_name
+    bool restart_prog(pm_tiny::session_t &session, const std::string &app_name
                       ,bool show_log) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
@@ -356,14 +326,16 @@ namespace pm_funcs {
             ifs >> msg;
             if (code != 1) {
                 show_msg(code, msg);
-                display_proc_infos(session);
+                if (code == 0) display_proc_infos(session);
+                return code == 0;
             } else {
-                loop_read_show_process_log(session);
+                return loop_read_show_process_log(session);
             }
         }
+        return false;
     }
 
-    void show_version(pm_tiny::session_t &session) {
+    bool show_version(pm_tiny::session_t &session) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::version)));
@@ -379,13 +351,15 @@ namespace pm_funcs {
             if (code == 0) {
                 fprintf(stdout, "pm: %s\n", PM_TINY_VERSION);
                 fprintf(stdout, "pm_tiny: %s\n", version.c_str());
+                return true;
             } else {
                 show_msg(code, msg);
             }
         }
+        return false;
     }
 
-    void loop_read_show_process_log(pm_tiny::session_t &session) {
+    bool loop_read_show_process_log(pm_tiny::session_t &session) {
         int msg_type = 0;
         std::string msg_content;
         while (!pm_is_stop) {
@@ -419,9 +393,10 @@ namespace pm_funcs {
         }
         printf("%s", PM_TINY_ANSI_COLOR_REST);
         fflush(stdout);
+        return !pm_is_stop && msg_type == 0;
     }
 
-    void show_prog_log(pm_tiny::session_t &session, const std::string &app_name) {
+    bool show_prog_log(pm_tiny::session_t &session, const std::string &app_name) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::log)));
@@ -435,13 +410,15 @@ namespace pm_funcs {
             ifs >> msg;
             if (code != 0) {
                 show_msg(code, msg);
+                return false;
             } else {
-                loop_read_show_process_log(session);
+                return loop_read_show_process_log(session);
             }
         }
+        return false;
     }
 
-    void pm_tiny_reload(pm_tiny::session_t &session, int) {
+    bool pm_tiny_reload(pm_tiny::session_t &session, int) {
         auto f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::reload)));
@@ -453,8 +430,10 @@ namespace pm_funcs {
             ifs >> code;
             ifs >> msg;
             show_msg(code, msg);
-            display_proc_infos(session);
+            if (code == 0) display_proc_infos(session);
+            return code == 0;
         }
+        return false;
     }
 
     bool pm_tiny_quit(pm_tiny::session_t &session) {
@@ -498,91 +477,4 @@ namespace pm_funcs {
         return false;
     }
 
-    void progcfg_t::read(pm_tiny::iframe_stream &ifs) {
-        std::underlying_type_t<pm_tiny::failure_action_t> failure_action_v;
-        ifs >> name;
-        ifs >> work_dir;
-        ifs >> command;
-        ifs >> daemon;
-        int depends_num;
-        ifs >> depends_num;
-        depends_on.resize(depends_num);
-        for (int i = 0; i < depends_num; i++) {
-            ifs >> depends_on[i];
-        }
-        ifs >> start_timeout;
-        ifs >> failure_action_v;
-        failure_action = static_cast<pm_tiny::failure_action_t>(failure_action_v);
-        ifs >> heartbeat_timeout;
-        ifs >> kill_timeout_sec;
-        ifs >> run_as;
-        ifs >> oom_score_adj;
-        int pty_flag = 1;
-        ifs >> pty_flag;
-        pty = (pty_flag != 0);
-        int restart_pending_flag = 0;
-        int restart_suppressed_flag = 0;
-        ifs >> restart_delay_ms >> restart_max_delay_ms >> restart_window_ms
-            >> restart_max_attempts >> restart_reset_after_ms;
-        ifs >> restart_pending_flag >> restart_delay_remaining_ms
-            >> restart_attempts_in_window >> restart_suppressed_flag
-            >> restart_suppression_reason;
-        restart_pending = restart_pending_flag != 0;
-        restart_suppressed = restart_suppressed_flag != 0;
-    }
-
-    void progcfg_t::show() {
-        fort::utf8_table prog_table;
-        prog_table.set_border_style(FT_BASIC_STYLE);
-        prog_table << "name" << name << fort::endr;
-        prog_table << "cwd" << work_dir << fort::endr;
-        prog_table << "command" << command << fort::endr;
-        prog_table << "user" << run_as << fort::endr;
-        prog_table << "daemon" << (daemon ? "Y" : "N") << fort::endr;
-        prog_table << "pty" << (pty ? "Y" : "N") << fort::endr;
-        std::string depends_on_ss;
-        if (!depends_on.empty()) {
-            for (size_t i = 0; i < depends_on.size(); i++) {
-                depends_on_ss += depends_on[i];
-                if (i != depends_on.size() - 1) {
-                    depends_on_ss += ",";
-                }
-            }
-        }
-        prog_table << "depends_on" << depends_on_ss << fort::endr;
-        std::string start_timeout_ss;
-        if (start_timeout > 0) {
-            start_timeout_ss = std::to_string(start_timeout) + "s";
-        } else if (start_timeout == 0) {
-            start_timeout_ss = "available immediately";
-        } else if (start_timeout < 0) {
-            start_timeout_ss = "wait for external trigger";
-        }
-        prog_table << "start_timeout" << start_timeout_ss << fort::endr;
-        prog_table << "failure_action" << pm_tiny::failure_action_to_str(failure_action) << fort::endr;
-        std::string heartbeat_timeout_ss;
-        if (heartbeat_timeout <= 0) {
-            heartbeat_timeout_ss = "disable";
-        } else {
-            heartbeat_timeout_ss = std::to_string(heartbeat_timeout) + "s";
-        }
-        prog_table << "heartbeat_timeout" << heartbeat_timeout_ss << fort::endr;
-        prog_table << "kill_timeout" << std::to_string(kill_timeout_sec) + "s" << fort::endr;
-        prog_table << "restart_delay_ms" << restart_delay_ms << fort::endr;
-        prog_table << "restart_max_delay_ms" << restart_max_delay_ms << fort::endr;
-        prog_table << "restart_window_ms" << restart_window_ms << fort::endr;
-        prog_table << "restart_max_attempts" << restart_max_attempts << fort::endr;
-        prog_table << "restart_reset_after_ms" << restart_reset_after_ms << fort::endr;
-        prog_table << "restart_pending" << (restart_pending ? "Y" : "N") << fort::endr;
-        prog_table << "restart_delay_remaining_ms"
-                   << (restart_pending ? std::to_string(restart_delay_remaining_ms) : "-") << fort::endr;
-        prog_table << "restart_attempts_in_window" << restart_attempts_in_window << fort::endr;
-        prog_table << "restart_suppressed" << (restart_suppressed ? "Y" : "N") << fort::endr;
-        prog_table << "restart_suppression_reason"
-                   << (restart_suppressed ? restart_suppression_reason : "-") << fort::endr;
-#ifdef __ANDROID__
-        prog_table << "oom_score_adj" << std::to_string(oom_score_adj) << fort::endr;
-#endif
-        std::cout << prog_table.to_string() << std::endl;
-    }
 }

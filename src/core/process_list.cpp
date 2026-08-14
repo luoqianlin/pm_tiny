@@ -34,7 +34,12 @@ void append_process_list(frame_t &frame, const std::vector<process_list_entry> &
         fappend_value<std::int64_t>(frame, entry.pid);
         fappend_value(frame, entry.name);
         fappend_value(frame, entry.cwd);
-        fappend_value(frame, entry.command);
+        fappend_value(frame, entry.executable);
+        if (entry.args.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+            throw std::length_error("argument list is too large");
+        }
+        fappend_value<std::int32_t>(frame, static_cast<std::int32_t>(entry.args.size()));
+        for (const auto &arg : entry.args) fappend_value(frame, arg);
         fappend_value<std::int32_t>(frame, entry.restart_count);
         fappend_value<std::int32_t>(frame, entry.state);
         append_bool(frame, entry.has_uptime);
@@ -55,6 +60,22 @@ void append_process_list(frame_t &frame, const std::vector<process_list_entry> &
         fappend_value<std::int32_t>(frame, entry.restart_attempts_in_window);
         append_bool(frame, entry.restart_suppressed);
         fappend_value(frame, entry.restart_suppression_reason);
+        fappend_value<std::uint64_t>(frame, entry.generation);
+        append_bool(frame, entry.ready);
+        append_bool(frame, entry.heartbeat_enabled);
+        append_bool(frame, entry.has_last_exit);
+        fappend_value(frame, entry.last_exit_reason);
+        fappend_value<std::int32_t>(frame, entry.last_exit_code);
+        fappend_value(frame, entry.process_tree_backend);
+        append_bool(frame, entry.process_tree_degraded);
+        fappend_value(frame, entry.process_tree_degradation_reason);
+        fappend_value(frame, entry.config_source);
+        append_bool(frame, entry.log_degraded);
+        fappend_value<std::uint64_t>(frame, entry.log_dropped_bytes);
+        fappend_value(frame, entry.log_last_error);
+        fappend_value<std::int64_t>(frame, entry.log_retry_remaining_ms);
+        fappend_value<std::int32_t>(frame, static_cast<std::int32_t>(entry.log_paths.size()));
+        for (const auto &path : entry.log_paths) fappend_value(frame, path);
     }
 }
 
@@ -71,7 +92,14 @@ std::vector<process_list_entry> read_process_list(iframe_stream &stream) {
     }
     std::vector<process_list_entry> entries(static_cast<std::size_t>(count));
     for (auto &entry : entries) {
-        stream >> entry.pid >> entry.name >> entry.cwd >> entry.command;
+        stream >> entry.pid >> entry.name >> entry.cwd >> entry.executable;
+        std::int32_t argument_count = 0;
+        stream >> argument_count;
+        if (argument_count < 0 || argument_count > max_dependency_count) {
+            throw protocol_error("invalid argument count");
+        }
+        entry.args.resize(static_cast<std::size_t>(argument_count));
+        for (auto &arg : entry.args) stream >> arg;
         stream >> entry.restart_count >> entry.state;
         entry.has_uptime = read_bool(stream, "invalid uptime availability flag");
         stream >> entry.uptime_ms;
@@ -100,6 +128,22 @@ std::vector<process_list_entry> read_process_list(iframe_stream &stream) {
         }
         entry.restart_suppressed = read_bool(stream, "invalid restart-suppressed flag");
         stream >> entry.restart_suppression_reason;
+        stream >> entry.generation;
+        entry.ready = read_bool(stream, "invalid ready flag");
+        entry.heartbeat_enabled = read_bool(stream, "invalid heartbeat-enabled flag");
+        entry.has_last_exit = read_bool(stream, "invalid last-exit availability flag");
+        stream >> entry.last_exit_reason >> entry.last_exit_code >> entry.process_tree_backend;
+        entry.process_tree_degraded = read_bool(stream, "invalid process-tree degraded flag");
+        stream >> entry.process_tree_degradation_reason >> entry.config_source;
+        entry.log_degraded = read_bool(stream, "invalid log-degraded flag");
+        std::int32_t log_path_count = 0;
+        stream >> entry.log_dropped_bytes >> entry.log_last_error >> entry.log_retry_remaining_ms
+               >> log_path_count;
+        if (log_path_count < 0 || log_path_count > 100)
+            throw protocol_error("invalid log path count");
+        entry.log_paths.resize(static_cast<std::size_t>(log_path_count));
+        for (auto &path : entry.log_paths) stream >> path;
+        if (entry.log_retry_remaining_ms < 0) throw protocol_error("invalid log retry delay");
     }
     return entries;
 }

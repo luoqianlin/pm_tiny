@@ -2,6 +2,33 @@
 
 All notable changes to PM_Tiny are documented in this file.
 
+## [3.2.0] - 2026-08-14
+
+### Added
+
+- Protocol v3 with structured runtime `start`, daemon inspection, and stable JSON schemas.
+- `pm info` / Android `pm2 info` for effective configuration sources, runtime mode, logging state,
+  process-tree backend, platform capabilities, PID, and uptime.
+- Cross-platform daemon configuration precedence and source tracking for command-line, environment,
+  YAML, default, and derived values.
+- Transactional runtime configuration persistence with environment sidecars and interrupted-save recovery.
+- Shared daemon and managed-program log rotation with observable fallback and retry state.
+- Windows foreground and SCM configuration parity, named-pipe security settings, and Job Object reporting.
+
+### Changed
+
+- Dynamic program creation now uses `pm start <name> [options] -- <executable> [args...]` on all platforms.
+- Program configuration uses structured `executable` and `args` fields and rejects removed legacy formats.
+- Missing, zero-byte, whitespace-only, and comment-only `prog.yaml` files start as an empty configuration;
+  `pm save` creates the file when persistence is requested.
+- Linux, Android, and Windows share protocol, configuration, inspection, persistence, logging, and renderer contracts.
+- Android continues to build the `pm` target while installing the client as `pm2`.
+
+### Removed
+
+- Protocol v2 and its legacy command/configuration compatibility paths.
+- Internal development instructions and environment-specific validation paths from the public tree.
+
 ## [2.0.0] - 2026-08-13
 
 First public cross-platform release.
@@ -29,3 +56,4 @@ First public cross-platform release.
 - Android installation of the ambiguous `pm` client alias.
 
 [2.0.0]: https://github.com/luoqianlin/pm_tiny/releases/tag/v2.0.0
+[3.2.0]: https://github.com/luoqianlin/pm_tiny/compare/v2.0.0...main

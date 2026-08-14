@@ -1,0 +1,22 @@
+- name: demo_env
+  executable: cmd.exe
+  args: ["/c", "echo VALUE=%TEST_FROM_PM% & timeout /t 2 >nul"]
+  cwd: .
+  daemon: false
+  restart_delay_ms: 0
+  env_vars:
+    - TEST_FROM_PM=from_config
+    - MIXED_Key=UpperCase
+  log_mode: split
+  log_max_size_kb: 4096
+  log_archive_count: 3
+
+- name: demo_ping
+  executable: cmd.exe
+  args: ["/c", "ping", "127.0.0.1", "-t"]
+  cwd: .
+  daemon: true
+  restart_delay_ms: 2000
+  log_mode: split
+  log_max_size_kb: 4096
+  log_archive_count: 3

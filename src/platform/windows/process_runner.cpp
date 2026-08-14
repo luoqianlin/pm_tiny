@@ -1,13 +1,17 @@
 #include "process_runner.h"
+#include "core/daemon_config.h"
+#include "core/pm_tiny.h"
+#include "daemon_log.h"
 
 #include "win_utils.h"
 
 #include <chrono>
-#include <iostream>
+#include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 
 namespace pm_tiny {
 namespace win {
@@ -20,12 +24,80 @@ unsigned long long monotonic_millis() {
 namespace {
 
 std::atomic_ullong next_generation{1};
+std::atomic_ullong next_log_pipe{1};
 
-std::vector<wchar_t> to_mutable_command_line(const std::string &command) {
+std::string quote_windows_argument(const std::string &argument) {
+    if (!argument.empty() && argument.find_first_of(" \t\"") == std::string::npos) return argument;
+    std::string result = "\"";
+    std::size_t slashes = 0;
+    for (const auto ch : argument) {
+        if (ch == '\\') { ++slashes; continue; }
+        if (ch == '"') result.append(slashes * 2 + 1, '\\');
+        else result.append(slashes, '\\');
+        slashes = 0;
+        result.push_back(ch);
+    }
+    result.append(slashes * 2, '\\');
+    return result + "\"";
+}
+
+std::vector<wchar_t> to_mutable_command_line(const ProgramConfig &config) {
+    std::string command = quote_windows_argument(config.executable);
+    for (const auto &arg : config.args) command += " " + quote_windows_argument(arg);
     auto wide = utf8_to_wide(command);
     std::vector<wchar_t> buffer(wide.begin(), wide.end());
     buffer.push_back(L'\0');
     return buffer;
+}
+
+std::string environment_key(const std::string &entry) {
+    const auto separator = entry.find('=');
+    return separator == std::string::npos ? std::string() : entry.substr(0, separator);
+}
+
+std::vector<std::string> effective_environment(const ProgramConfig &config) {
+    std::vector<std::string> result;
+    std::unordered_map<std::string, std::size_t> indices;
+    const auto apply = [&](const std::string &entry) {
+        auto key = environment_key(entry);
+        if (key.empty()) throw std::runtime_error("invalid environment entry: " + entry);
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char value) {
+            return static_cast<char>(std::toupper(value));
+        });
+        const auto found = indices.find(key);
+        if (found == indices.end()) {
+            indices[key] = result.size();
+            result.push_back(entry);
+        } else {
+            result[found->second] = entry;
+        }
+    };
+    if (config.envs.empty()) {
+        auto environment = GetEnvironmentStringsW();
+        if (environment == nullptr) throw std::runtime_error("GetEnvironmentStringsW failed");
+        try {
+            for (const wchar_t *item = environment; *item != L'\0'; item += wcslen(item) + 1) {
+                const auto entry = wide_to_utf8(item);
+                if (!entry.empty() && entry[0] != '=' && entry.rfind("PM_TINY_", 0) != 0) apply(entry);
+            }
+        } catch (...) {
+            FreeEnvironmentStringsW(environment);
+            throw;
+        }
+        FreeEnvironmentStringsW(environment);
+    } else {
+        for (const auto &entry : config.envs) apply(entry);
+    }
+    for (const auto &entry : config.env_vars) apply(entry);
+    return result;
+}
+
+std::string environment_value(const std::vector<std::string> &environment, const char *wanted) {
+    for (const auto &entry : environment) {
+        const auto key = environment_key(entry);
+        if (_stricmp(key.c_str(), wanted) == 0) return entry.substr(key.size() + 1);
+    }
+    return {};
 }
 
 void close_handle_safe(HANDLE &handle) {
@@ -35,39 +107,31 @@ void close_handle_safe(HANDLE &handle) {
     }
 }
 
-void start_logging_thread(ProcessHandle &handle) {
-    if (handle.pipe_read == nullptr || handle.pipe_read == INVALID_HANDLE_VALUE) {
-        return;
+bool create_overlapped_log_pipe(HANDLE &pipe_read, HANDLE &pipe_write,
+                                std::string &error_message) {
+    const auto pipe_name = L"\\\\.\\pipe\\pm_tiny_log_" + std::to_wstring(GetCurrentProcessId()) +
+                           L"_" + std::to_wstring(next_log_pipe.fetch_add(1));
+    pipe_read = CreateNamedPipeW(
+        pipe_name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 64 * 1024, 64 * 1024, 0, nullptr);
+    if (pipe_read == INVALID_HANDLE_VALUE) {
+        pipe_read = nullptr;
+        error_message = "CreateNamedPipeW failed with error code " + std::to_string(GetLastError());
+        return false;
     }
-    auto running = handle.log_thread_running;
-    auto pipe_read = handle.pipe_read;
-    auto log_writer = handle.log_writer.get();
-    running->store(true);
-    handle.log_thread = std::thread([running, pipe_read, log_writer]() {
-        const DWORD buffer_size = 4096;
-        std::vector<char> buffer(buffer_size);
-        while (running->load()) {
-            DWORD bytes_read = 0;
-            BOOL ok = ReadFile(pipe_read, buffer.data(), buffer_size, &bytes_read, nullptr);
-            if (!ok || bytes_read == 0) {
-                break;
-            }
-            try {
-                if (log_writer != nullptr) {
-                    log_writer->append(buffer.data(), static_cast<std::size_t>(bytes_read));
-                }
-            } catch (const std::exception &ex) {
-                std::cerr << "[ERROR] log write failed: " << ex.what() << std::endl;
-            }
-        }
-        if (log_writer != nullptr) {
-            try {
-                log_writer->flush();
-            } catch (...) {
-            }
-        }
-        running->store(false);
-    });
+    SECURITY_ATTRIBUTES inheritable{};
+    inheritable.nLength = sizeof(inheritable);
+    inheritable.bInheritHandle = TRUE;
+    pipe_write = CreateFileW(pipe_name.c_str(), GENERIC_WRITE, 0, &inheritable, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (pipe_write == INVALID_HANDLE_VALUE) {
+        const auto error = GetLastError();
+        pipe_write = nullptr;
+        close_handle_safe(pipe_read);
+        error_message = "CreateFileW log pipe failed with error code " + std::to_string(error);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -87,54 +151,71 @@ ProcessHandle &ProcessHandle::operator=(ProcessHandle &&other) noexcept {
         proc_info = other.proc_info;
         has_process = other.has_process;
         job = other.job;
-        pipe_read = other.pipe_read;
-        log_writer = std::move(other.log_writer);
-        log_thread = std::move(other.log_thread);
-        log_thread_running = std::move(other.log_thread_running);
+        for (int i = 0; i < 2; ++i) {
+            pipe_read[i] = other.pipe_read[i];
+            log_writers[i] = std::move(other.log_writers[i]);
+            log_pipe_eof[i] = other.log_pipe_eof[i];
+            watched_log_generation[i] = other.watched_log_generation[i];
+        }
+        log_tail = std::move(other.log_tail);
+        log_health = std::move(other.log_health);
+        log_paths = std::move(other.log_paths);
         disable_restart = other.disable_restart;
         ready = other.ready;
         launch_time_ms = other.launch_time_ms;
         last_tick_ms = other.last_tick_ms;
         generation = other.generation;
+        watched_generation = other.watched_generation;
+        root_exit_observed = other.root_exit_observed;
+        root_exit_code = other.root_exit_code;
+        has_last_exit = other.has_last_exit;
+        last_exit_code = other.last_exit_code;
         restart_count = other.restart_count;
-        termination_phase = other.termination_phase;
+        termination = other.termination;
         completion_action = other.completion_action;
-        termination_deadline_ms = other.termination_deadline_ms;
         termination_exit_code = other.termination_exit_code;
         restart_pending = other.restart_pending;
         restart_due_ms = other.restart_due_ms;
         restart_state = std::move(other.restart_state);
+        config_source = std::move(other.config_source);
 
         other.proc_info = PROCESS_INFORMATION{};
         other.has_process = false;
         other.job = nullptr;
-        other.pipe_read = nullptr;
-        other.log_thread_running = std::make_shared<std::atomic_bool>(false);
+        for (int i = 0; i < 2; ++i) {
+            other.pipe_read[i] = nullptr;
+            other.log_pipe_eof[i] = false;
+            other.watched_log_generation[i] = 0;
+        }
         other.disable_restart = false;
         other.ready = false;
         other.launch_time_ms = 0;
         other.last_tick_ms = 0;
         other.generation = 0;
+        other.watched_generation = 0;
+        other.root_exit_observed = false;
+        other.root_exit_code = STILL_ACTIVE;
+        other.has_last_exit = false;
+        other.last_exit_code = 0;
         other.restart_count = 0;
-        other.termination_phase = TerminationPhase::none;
+        other.termination = termination_job{};
         other.completion_action = CompletionAction::automatic;
-        other.termination_deadline_ms = 0;
         other.termination_exit_code = 0;
         other.restart_pending = false;
         other.restart_due_ms = 0;
         other.restart_state.reset();
+        other.config_source = "file";
     }
     return *this;
 }
 
 void ProcessHandle::reset() {
-    if (log_thread.joinable()) {
-        log_thread_running->store(false);
-        close_handle_safe(pipe_read);
-        log_thread.join();
+    poll_program_log(*this);
+    for (int i = 0; i < 2; ++i) {
+        if (log_writers[i]) { std::string ignored; log_writers[i]->flush(ignored); }
+        log_writers[i].reset();
+        close_handle_safe(pipe_read[i]);
     }
-    log_writer.reset();
-    close_handle_safe(pipe_read);
     close_handle_safe(job);
     if (has_process) {
         close_handle_safe(proc_info.hThread);
@@ -145,48 +226,45 @@ void ProcessHandle::reset() {
     ready = false;
     launch_time_ms = 0;
     last_tick_ms = 0;
-    termination_phase = TerminationPhase::none;
+    termination = termination_job{};
     completion_action = CompletionAction::automatic;
-    termination_deadline_ms = 0;
     termination_exit_code = 0;
-    if (!log_thread_running) log_thread_running = std::make_shared<std::atomic_bool>(false);
+    log_pipe_eof[0] = log_pipe_eof[1] = false;
+    watched_log_generation[0] = watched_log_generation[1] = 0;
+    watched_generation = 0;
+    root_exit_observed = false;
+    root_exit_code = STILL_ACTIVE;
 }
 
 bool launch_program(ProcessHandle &handle, std::string &error_message) {
     const bool has_launched_before = handle.generation != 0;
     handle.reset();
 
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = nullptr;
-
-    HANDLE pipe_read = nullptr;
-    HANDLE pipe_write = nullptr;
-    if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) {
-        error_message = "CreatePipe failed with error code " + std::to_string(GetLastError());
-        return false;
-    }
-    if (!SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)) {
-        close_handle_safe(pipe_read);
-        close_handle_safe(pipe_write);
-        error_message = "SetHandleInformation failed with error code " + std::to_string(GetLastError());
-        return false;
+    HANDLE pipe_read[2]{nullptr, nullptr};
+    HANDLE pipe_write[2]{nullptr, nullptr};
+    const auto close_pipes = [&]() {
+        for (int i = 0; i < 2; ++i) { close_handle_safe(pipe_read[i]); close_handle_safe(pipe_write[i]); }
+    };
+    const int stream_count = handle.config.log_mode == log_mode_t::split ? 2 : 1;
+    for (int i = 0; i < stream_count; ++i) {
+        if (!create_overlapped_log_pipe(pipe_read[i], pipe_write[i], error_message)) {
+            for (int j = 0; j < 2; ++j) { close_handle_safe(pipe_read[j]); close_handle_safe(pipe_write[j]); }
+            return false;
+        }
     }
 
     STARTUPINFOW startup_info;
     ZeroMemory(&startup_info, sizeof(startup_info));
     startup_info.cb = sizeof(startup_info);
     startup_info.dwFlags |= STARTF_USESTDHANDLES;
-    startup_info.hStdOutput = pipe_write;
-    startup_info.hStdError = pipe_write;
+    startup_info.hStdOutput = pipe_write[0];
+    startup_info.hStdError = stream_count == 2 ? pipe_write[1] : pipe_write[0];
     startup_info.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
     PROCESS_INFORMATION process_info{};
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     if (job == nullptr) {
-        close_handle_safe(pipe_read);
-        close_handle_safe(pipe_write);
+        close_pipes();
         error_message = "CreateJobObjectW failed with error code " + std::to_string(GetLastError());
         return false;
     }
@@ -195,18 +273,16 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &job_info, sizeof(job_info))) {
         const auto last_error = GetLastError();
         close_handle_safe(job);
-        close_handle_safe(pipe_read);
-        close_handle_safe(pipe_write);
+        close_pipes();
         error_message = "SetInformationJobObject failed with error code " + std::to_string(last_error);
         return false;
     }
 
     std::vector<wchar_t> cmd_line;
     try {
-        cmd_line = to_mutable_command_line(handle.config.command);
+        cmd_line = to_mutable_command_line(handle.config);
     } catch (const std::exception &ex) {
-        close_handle_safe(pipe_read);
-        close_handle_safe(pipe_write);
+        close_pipes();
         close_handle_safe(job);
         error_message = std::string("Failed to convert command to UTF-16: ") + ex.what();
         return false;
@@ -219,16 +295,22 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
             cwd_w = utf8_to_wide(handle.config.cwd);
             cwd_ptr = cwd_w.c_str();
         } catch (const std::exception &ex) {
-            close_handle_safe(pipe_read);
-            close_handle_safe(pipe_write);
+            close_pipes();
             close_handle_safe(job);
             error_message = std::string("Failed to convert working directory: ") + ex.what();
             return false;
         }
     }
 
-    std::vector<std::string> environment = handle.config.env_vars;
+    std::vector<std::string> environment;
+    try { environment = effective_environment(handle.config); }
+    catch (const std::exception &ex) {
+        close_pipes(); close_handle_safe(job);
+        error_message = std::string("environment: ") + ex.what();
+        return false;
+    }
     environment.push_back("PM_TINY_APP_NAME=" + handle.config.name);
+    environment.push_back(std::string("PM_TINY_HOME=") + daemon_environment(PM_TINY_HOME));
     environment.push_back("PM_TINY_PIPE_NAME=" + control_pipe_name());
     std::vector<wchar_t> env_block;
     LPWSTR environment_ptr = nullptr;
@@ -239,11 +321,38 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
                 environment_ptr = env_block.data();
             }
         } catch (const std::exception &ex) {
-            std::cerr << "[ERROR] Failed to build environment block: " << ex.what() << std::endl;
+            close_pipes(); close_handle_safe(job);
+            error_message = std::string("environment: ") + ex.what();
+            return false;
         }
     }
+    std::wstring executable_w;
+    try { executable_w = utf8_to_wide(handle.config.executable); }
+    catch (const std::exception &ex) {
+        close_pipes(); close_handle_safe(job);
+        error_message = std::string("Failed to convert executable to UTF-16: ") + ex.what();
+        return false;
+    }
+    if (executable_w.find(L'\\') == std::wstring::npos && executable_w.find(L'/') == std::wstring::npos) {
+        std::vector<wchar_t> resolved(32768);
+        std::wstring search_path;
+        try { search_path = utf8_to_wide(environment_value(environment, "PATH")); }
+        catch (const std::exception &ex) {
+            close_pipes(); close_handle_safe(job);
+            error_message = std::string("resolve: invalid PATH: ") + ex.what();
+            return false;
+        }
+        const DWORD length = SearchPathW(search_path.empty() ? L"" : search_path.c_str(), executable_w.c_str(), nullptr,
+                                         static_cast<DWORD>(resolved.size()), resolved.data(), nullptr);
+        if (length == 0 || length >= resolved.size()) {
+            close_pipes(); close_handle_safe(job);
+            error_message = "resolve: executable not found: " + handle.config.executable;
+            return false;
+        }
+        executable_w.assign(resolved.data(), length);
+    }
     BOOL success = CreateProcessW(
-        nullptr,
+        executable_w.c_str(),
         cmd_line.data(),
         nullptr,
         nullptr,
@@ -254,13 +363,13 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
         &startup_info,
         &process_info);
 
-    close_handle_safe(pipe_write);
+    for (auto &pipe : pipe_write) close_handle_safe(pipe);
 
     if (!success) {
         const auto last_error = GetLastError();
-        close_handle_safe(pipe_read);
+        for (auto &pipe : pipe_read) close_handle_safe(pipe);
         close_handle_safe(job);
-        error_message = "CreateProcessW failed with error code " + std::to_string(last_error);
+        error_message = "spawn: CreateProcessW failed with error code " + std::to_string(last_error);
         return false;
     }
 
@@ -270,7 +379,7 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
         WaitForSingleObject(process_info.hProcess, 3000);
         close_handle_safe(process_info.hThread);
         close_handle_safe(process_info.hProcess);
-        close_handle_safe(pipe_read);
+        for (auto &pipe : pipe_read) close_handle_safe(pipe);
         close_handle_safe(job);
         error_message = "AssignProcessToJobObject failed with error code " + std::to_string(last_error);
         return false;
@@ -281,7 +390,7 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
         WaitForSingleObject(process_info.hProcess, 3000);
         close_handle_safe(process_info.hThread);
         close_handle_safe(process_info.hProcess);
-        close_handle_safe(pipe_read);
+        for (auto &pipe : pipe_read) close_handle_safe(pipe);
         close_handle_safe(job);
         error_message = "ResumeThread failed with error code " + std::to_string(last_error);
         return false;
@@ -295,36 +404,104 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
     if (has_launched_before) ++handle.restart_count;
     handle.launch_time_ms = monotonic_millis();
     handle.last_tick_ms = handle.launch_time_ms;
-    handle.pipe_read = pipe_read;
+    for (int i = 0; i < stream_count; ++i) handle.pipe_read[i] = pipe_read[i];
 
-    std::string log_file_name = handle.config.log_file_name;
-    if (log_file_name.empty()) {
-        log_file_name = handle.config.name.empty() ? "pm_tiny.log" : handle.config.name + ".log";
-    }
-    std::size_t max_size_bytes = static_cast<std::size_t>(handle.config.log_max_size_kb) * 1024ULL;
-    if (max_size_bytes == 0) {
-        max_size_bytes = 4 * 1024 * 1024ULL;
-    }
-    int log_files = handle.config.log_file_count > 0 ? handle.config.log_file_count : 3;
-    try {
-        handle.log_writer = std::make_unique<LogWriter>(handle.config.log_dir,
-                                                        log_file_name,
-                                                        max_size_bytes,
-                                                        log_files);
-    } catch (const std::exception &ex) {
-        std::cerr << "[ERROR] Failed to create log writer for " << handle.config.name
-                  << ": " << ex.what() << std::endl;
+    const char *default_log_dir = std::getenv("PM_TINY_APP_LOG_DIR");
+    handle.log_paths = derive_log_paths(handle.config.log_dir.empty()
+                                            ? (default_log_dir ? default_log_dir : "logs")
+                                            : handle.config.log_dir,
+                                        handle.config.name, handle.config.log_mode,
+                                        handle.config.log_file_name);
+    handle.log_health.reset();
+    for (std::size_t i = 0; i < handle.log_paths.size(); ++i) {
+        handle.log_writers[i].reset(new rotating_log_writer(
+            handle.log_paths[i], static_cast<std::size_t>(handle.config.log_max_size_kb) * 1024U,
+            handle.config.log_archive_count));
+        std::string log_error;
+        if (!handle.log_writers[i]->open(log_error)) {
+            handle.log_writers[i].reset();
+            handle.log_health.record_failure(monotonic_millis(), 0, log_error);
+            daemon_log_message(daemon_log_level_t::error, "Program `" + handle.config.name + "` log degraded: " + log_error);
+        }
     }
     handle.disable_restart = false;
-    handle.termination_phase = TerminationPhase::none;
+    handle.termination = termination_job{};
     handle.completion_action = CompletionAction::automatic;
-    handle.termination_deadline_ms = 0;
     handle.termination_exit_code = 0;
     handle.restart_pending = false;
     handle.restart_due_ms = 0;
-    start_logging_thread(handle);
+    handle.log_tail.clear();
+    handle.log_pipe_eof[0] = handle.log_pipe_eof[1] = false;
+    handle.watched_log_generation[0] = handle.watched_log_generation[1] = 0;
 
     return true;
+}
+
+void poll_program_log(ProcessHandle &handle) {
+    for (int stream = 0; stream < 2; ++stream) for (;;) {
+        if (handle.pipe_read[stream] == nullptr || handle.pipe_read[stream] == INVALID_HANDLE_VALUE ||
+            handle.log_pipe_eof[stream]) break;
+        DWORD available = 0;
+        if (!PeekNamedPipe(handle.pipe_read[stream], nullptr, 0, nullptr, &available, nullptr)) {
+            const auto error = GetLastError();
+            if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) handle.log_pipe_eof[stream] = true;
+            break;
+        }
+        if (available == 0) break;
+        std::vector<char> buffer(std::min<DWORD>(available, 16 * 1024));
+        DWORD bytes_read = 0;
+        if (!ReadFile(handle.pipe_read[stream], buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, nullptr) ||
+            bytes_read == 0) {
+            handle.log_pipe_eof[stream] = true;
+            break;
+        }
+        append_program_log(handle, stream, buffer.data(), bytes_read);
+    }
+}
+
+void append_program_log(ProcessHandle &handle, int stream_index, const char *data, std::size_t size) {
+    if (data == nullptr || size == 0) return;
+    handle.log_tail.append(data, size);
+    const int writer_index = handle.config.log_mode == log_mode_t::combined ? 0 : stream_index;
+    const auto now = monotonic_millis();
+    if (!handle.log_writers[writer_index] && (!handle.log_health.degraded || handle.log_health.retry_ready(now))) {
+        handle.log_writers[writer_index].reset(new rotating_log_writer(
+            handle.log_paths[writer_index], static_cast<std::size_t>(handle.config.log_max_size_kb) * 1024U,
+            handle.config.log_archive_count));
+        std::string open_error;
+        if (!handle.log_writers[writer_index]->open(open_error)) {
+            handle.log_writers[writer_index].reset();
+            handle.log_health.record_failure(now, size, open_error);
+            return;
+        }
+        const int writer_count = handle.config.log_mode == log_mode_t::combined ? 1 : 2;
+        for (int i = 0; i < writer_count; ++i) {
+            if (handle.log_writers[i]) continue;
+            handle.log_writers[i].reset(new rotating_log_writer(
+                handle.log_paths[i], static_cast<std::size_t>(handle.config.log_max_size_kb) * 1024U,
+                handle.config.log_archive_count));
+            std::string sibling_error;
+            if (!handle.log_writers[i]->open(sibling_error)) {
+                handle.log_writers[i].reset();
+                handle.log_health.record_failure(now, 0, sibling_error);
+            }
+        }
+        bool all_writers_open = true;
+        for (int i = 0; i < writer_count; ++i)
+            all_writers_open = all_writers_open && !!handle.log_writers[i];
+        if (handle.log_health.degraded && all_writers_open) {
+            daemon_log_message(daemon_log_level_t::info, "Program `" + handle.config.name + "` log recovered.");
+            handle.log_health.record_recovery();
+        }
+    }
+    if (!handle.log_writers[writer_index]) { handle.log_health.dropped_bytes += size; return; }
+    std::string error;
+    if (!handle.log_writers[writer_index]->append(data, size, error)) {
+        handle.log_writers[writer_index].reset();
+        const bool changed = !handle.log_health.degraded || handle.log_health.last_error != error;
+        handle.log_health.record_failure(now, size, error);
+        if (changed) daemon_log_message(daemon_log_level_t::error, "Program `" + handle.config.name + "` log degraded: " + error);
+    }
 }
 
 bool rebuild_dependencies(RuntimeControlState &state,
@@ -339,8 +516,9 @@ bool rebuild_dependencies(RuntimeControlState &state,
         error_message = error.message;
         return false;
     }
+    const auto snapshot = state.dependencies.snapshot();
     state.graph = std::move(graph);
-    state.dependencies.reset(state.graph);
+    state.dependencies.migrate(state.graph, snapshot);
     error_message.clear();
     return true;
 }
@@ -463,19 +641,16 @@ bool request_program_termination(ProcessHandle &handle,
     if (!handle.has_process || handle.proc_info.hProcess == nullptr) return true;
     handle.completion_action = completion_action;
     handle.termination_exit_code = exit_code;
-    if (handle.termination_phase != TerminationPhase::none) return true;
-
-    const auto timeout_ms = handle.config.kill_timeout_s > 0
-                            ? static_cast<unsigned long long>(handle.config.kill_timeout_s) * 1000ULL
-                            : 0ULL;
-    handle.termination_deadline_ms = monotonic_millis() + timeout_ms;
+    const auto action = handle.termination.request(handle.generation,
+                                                   static_cast<std::int64_t>(monotonic_millis()),
+                                                   handle.config.kill_timeout_s);
+    if (action == termination_action::none) return true;
     if (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, handle.proc_info.dwProcessId)) {
-        handle.termination_phase = TerminationPhase::graceful_requested;
         return true;
     }
 
     const auto signal_error = GetLastError();
-    handle.termination_phase = TerminationPhase::force_kill_requested;
+    handle.termination.force(handle.generation);
     std::string force_error;
     if (!force_terminate_program(handle, exit_code, force_error)) {
         error_message = "GenerateConsoleCtrlEvent failed with error code " + std::to_string(signal_error) +
@@ -492,51 +667,9 @@ bool poll_program_termination(ProcessHandle &handle,
                               bool &tree_empty,
                               std::string &error_message) {
     if (!is_process_tree_empty(handle, tree_empty, error_message)) return false;
-    if (tree_empty || handle.termination_phase != TerminationPhase::graceful_requested ||
-        now_ms < handle.termination_deadline_ms) {
-        return true;
-    }
-    handle.termination_phase = TerminationPhase::force_kill_requested;
+    const auto action = handle.termination.poll(handle.generation, static_cast<std::int64_t>(now_ms), tree_empty);
+    if (action != termination_action::send_kill) return true;
     return force_terminate_program(handle, handle.termination_exit_code, error_message);
-}
-
-WaitResult wait_for_handles(const std::vector<HANDLE> &handles,
-                            unsigned long timeout_ms,
-                            std::string &error_message) {
-    WaitResult result;
-    if (handles.empty()) {
-        return result;
-    }
-    if (handles.size() > MAXIMUM_WAIT_OBJECTS) {
-        error_message = "Too many processes; Windows WaitForMultipleObjects limit exceeded.";
-        return result;
-    }
-    DWORD wait_rc = WaitForMultipleObjects(static_cast<DWORD>(handles.size()),
-                                           handles.data(),
-                                           FALSE,
-                                           timeout_ms);
-    if (wait_rc == WAIT_FAILED) {
-        auto last_error = GetLastError();
-        error_message = "WaitForMultipleObjects failed with error code " + std::to_string(last_error);
-        return result;
-    }
-    if (wait_rc == WAIT_TIMEOUT) {
-        return result;
-    }
-    DWORD base = WAIT_OBJECT_0;
-    if (wait_rc >= base && wait_rc < base + handles.size()) {
-        result.has_event = true;
-        result.index = static_cast<size_t>(wait_rc - base);
-        return result;
-    }
-    DWORD abandon_base = WAIT_ABANDONED_0;
-    if (wait_rc >= abandon_base && wait_rc < abandon_base + handles.size()) {
-        result.has_event = true;
-        result.index = static_cast<size_t>(wait_rc - abandon_base);
-        return result;
-    }
-    error_message = "Unexpected WaitForMultipleObjects return value: " + std::to_string(wait_rc);
-    return result;
 }
 
 void terminate_all(std::vector<ProcessHandle> &processes, unsigned long wait_timeout_ms) {
@@ -552,7 +685,7 @@ void terminate_all(std::vector<ProcessHandle> &processes, unsigned long wait_tim
         }
         std::string terminate_error;
         if (!force_terminate_program(proc, 0, terminate_error)) {
-            std::cerr << "[ERROR] " << terminate_error << std::endl;
+            daemon_log_message(daemon_log_level_t::error, terminate_error);
         }
         WaitForSingleObject(proc.proc_info.hProcess, wait_ms);
         proc.reset();

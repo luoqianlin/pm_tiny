@@ -1,8 +1,9 @@
 #include <unistd.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include "pm_tiny_server.h"
 #include "asio_daemon_loop.h"
-#include "log.h"
+#include "daemon_log.h"
 #include "time_util.h"
 #include "prog.h"
 #include "assert.h"
@@ -11,6 +12,7 @@
 #include "pm_sys.h"
 #include "android_lmkd.h"
 #include "process_reaper.h"
+#include "daemon_config.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
@@ -22,21 +24,34 @@ static volatile sig_atomic_t exit_signal = 0;
 static volatile sig_atomic_t alarm_signal = 0;
 static volatile sig_atomic_t hup_signal = 0;
 static volatile sig_atomic_t exit_chld_signal = 0;
+static volatile sig_atomic_t signal_wakeup_fd = -1;
+
+static void wake_event_loop() {
+    if (signal_wakeup_fd < 0) return;
+    const char byte = 1;
+    const int saved_errno = errno;
+    (void)::write(static_cast<int>(signal_wakeup_fd), &byte, 1);
+    errno = saved_errno;
+}
 
 void sig_exit_handler(int sig, siginfo_t *, void *) {
     exit_signal = sig;
+    wake_event_loop();
 }
 
 void sig_chld_handler(int sig, siginfo_t *, void *) {
     exit_chld_signal = sig;
+    wake_event_loop();
 }
 
 void sig_alarm_handler(int sig, siginfo_t *, void *) {
     alarm_signal = sig;
+    wake_event_loop();
 }
 
 void sig_hup_handler(int sig, siginfo_t *, void *) {
     hup_signal = sig;
+    wake_event_loop();
 }
 
 static sig_atomic_t take_pending_signal(volatile sig_atomic_t &pending, int signo) {
@@ -45,13 +60,14 @@ static sig_atomic_t take_pending_signal(volatile sig_atomic_t &pending, int sign
     sigemptyset(&blocked);
     sigaddset(&blocked, signo);
     if (sigprocmask(SIG_BLOCK, &blocked, &previous) == -1) {
-        PM_TINY_LOG_E_SYS("sigprocmask block signal %d", signo);
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask block signal %d", signo);
         return 0;
     }
     sig_atomic_t saved = pending;
     pending = 0;
     if (sigprocmask(SIG_SETMASK, &previous, nullptr) == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigprocmask restore signal %d", signo);
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask restore signal %d", signo);
+        std::exit(EXIT_FAILURE);
     }
     return saved;
 }
@@ -63,13 +79,14 @@ static sig_atomic_t take_pending_exit_signal() {
     sigaddset(&blocked, SIGTERM);
     sigaddset(&blocked, SIGINT);
     if (sigprocmask(SIG_BLOCK, &blocked, &previous) == -1) {
-        PM_TINY_LOG_E_SYS("sigprocmask block exit signals");
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask block exit signals");
         return 0;
     }
     sig_atomic_t saved = exit_signal;
     exit_signal = 0;
     if (sigprocmask(SIG_SETMASK, &previous, nullptr) == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigprocmask restore exit signals");
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask restore exit signals");
+        std::exit(EXIT_FAILURE);
     }
     return saved;
 }
@@ -78,7 +95,7 @@ static void check_delayed_exit_sig(pm_tiny_server_t &tiny_server) {
 //    proglist_t &pm_tiny_progs = tiny_server.pm_tiny_progs;
     sig_atomic_t save_exit_signal = take_pending_exit_signal();
     if (save_exit_signal) {
-        pm_tiny::logger->safe_signal_log(save_exit_signal);
+        pm_tiny::daemon_log_signal(save_exit_signal);
         bool terminate = save_exit_signal == SIGTERM
                          || save_exit_signal == SIGINT;
         if (terminate) {
@@ -96,7 +113,7 @@ static void check_delayed_exit_sig(pm_tiny_server_t &tiny_server) {
             return !find;
         });
         if (find) {
-            PM_TINY_LOG_I("force kill %s(pid:%d)", prog->name.c_str(), prog->instance.pid);
+            PM_TINY_DLOG_INFO("force kill %s(pid:%d)", prog->name.c_str(), prog->instance.pid);
             xx_kill_1(prog, SIGKILL);
             pm_tiny::sleep_waitfor(1, [&find, &prog]() {
                 find = xx_wait_1(prog, 0);
@@ -117,7 +134,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
     int wstatus, rc;
     sig_atomic_t save_exit_chld_signal = take_pending_signal(exit_chld_signal, SIGCHLD);
     if (save_exit_chld_signal) {
-        pm_tiny::logger->safe_signal_log(save_exit_chld_signal);
+        pm_tiny::daemon_log_signal(save_exit_chld_signal);
         proglist_t starting_prog;
         proglist_t penddingtask_progs;
         proglist_t deleting_progs;
@@ -132,14 +149,15 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                 auto p = *iter;
                     tiny_server.mark_dependency_stopped(p);
                     std::string exit_info = pm_tiny::prog_info_t::log_proc_exit_status(&(*p), rc, wstatus);
-                    PM_TINY_LOG_I("%s", exit_info.c_str());
+                    PM_TINY_DLOG_INFO("%s", exit_info.c_str());
                     auto now_ms = p->update_count_timer();
                     auto life_time = now_ms - p->last_startup_ms;
                     p->last_wstatus = wstatus;
+                    p->has_last_exit = true;
                     p->close_fds(tiny_server.lmkdFd);
                     const bool tree_empty = p->is_tree_empty();
                     if (!tree_empty) {
-                        PM_TINY_LOG_E("`%s` root exited while descendants remain; terminating process tree",
+                        PM_TINY_DLOG_ERROR("`%s` root exited while descendants remain; terminating process tree",
                                       p->name.c_str());
                         const bool should_restart = p->daemon &&
                             p->state != PM_TINY_PROG_STATE_REQUEST_STOP &&
@@ -149,12 +167,12 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                                 const auto decision = p->plan_automatic_restart(now_ms, life_time);
                                 if (decision.restart) {
                                     p->state = PM_TINY_PROG_STATE_WAITING_START;
-                                    PM_TINY_LOG_I("`%s` restart scheduled in %dms (attempt %d)",
+                                    PM_TINY_DLOG_INFO("`%s` restart scheduled in %dms (attempt %d)",
                                                   p->name.c_str(), decision.delay_ms,
                                                   decision.attempts_in_window);
                                 } else {
                                     p->state = PM_TINY_PROG_STATE_STOPED;
-                                    PM_TINY_LOG_E("`%s` automatic restart suppressed after %d attempts",
+                                    PM_TINY_DLOG_ERROR("`%s` automatic restart suppressed after %d attempts",
                                                   p->name.c_str(), decision.attempts_in_window);
                                 }
                             });
@@ -180,14 +198,14 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                         if (decision.restart) {
                             p->dead_count++;
                             p->state = PM_TINY_PROG_STATE_WAITING_START;
-                            PM_TINY_LOG_I("`%s` restart scheduled in %dms (attempt %d)",
+                            PM_TINY_DLOG_INFO("`%s` restart scheduled in %dms (attempt %d)",
                                           p->name.c_str(), decision.delay_ms,
                                           decision.attempts_in_window);
                         } else {
                             if (p->state == PM_TINY_PROG_STATE_STARTING) {
                                 starting_prog.push_back(p);
                             }
-                            PM_TINY_LOG_E("`%s` automatic restart suppressed after %d attempts",
+                            PM_TINY_DLOG_ERROR("`%s` automatic restart suppressed after %d attempts",
                                           p->name.c_str(), decision.attempts_in_window);
                             p->set_state(PM_TINY_PROG_STATE_STOPED);
                         }
@@ -202,7 +220,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                         }
                     }
             } else {
-                PM_TINY_LOG_I("%s", pm_tiny::describe_reaped_descendant(child).c_str());
+                PM_TINY_DLOG_INFO("%s", pm_tiny::describe_reaped_descendant(child).c_str());
             }
 
         }
@@ -226,7 +244,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
             prog->restart_pending = false;
             prog->restart_due_ms = 0;
             if (ret == -1) {
-                PM_TINY_LOG_E_SYS("scheduled restart `%s` failed", prog->name.c_str());
+                PM_TINY_DLOG_ERROR_ERRNO("scheduled restart `%s` failed", prog->name.c_str());
                 tiny_server.flag_startup_fail(prog);
             }
             continue;
@@ -252,7 +270,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                         starting_prog.push_back(prog);
                         prog->state = PM_TINY_PROG_STATE_RUNING;
                         prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
-                        PM_TINY_LOG_D("start timeout:%s", prog->name.c_str());
+                        PM_TINY_DLOG_DEBUG("start timeout:%s", prog->name.c_str());
                     } else if (prog->failure_action == pm_tiny::failure_action_t::RESTART) {
                         prog->async_kill_prog();
                         auto start_prog_task =
@@ -263,18 +281,18 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                                     if (decision.restart) {
                                         ++prog->dead_count;
                                         prog->state = PM_TINY_PROG_STATE_WAITING_START;
-                                        PM_TINY_LOG_I("`%s` timeout restart scheduled in %dms (attempt %d)",
+                                        PM_TINY_DLOG_INFO("`%s` timeout restart scheduled in %dms (attempt %d)",
                                                       prog->name.c_str(), decision.delay_ms,
                                                       decision.attempts_in_window);
                                     } else {
                                         prog->state = PM_TINY_PROG_STATE_STOPED;
-                                        PM_TINY_LOG_E("`%s` timeout restart suppressed after %d attempts",
+                                        PM_TINY_DLOG_ERROR("`%s` timeout restart suppressed after %d attempts",
                                                       prog->name.c_str(), decision.attempts_in_window);
                                     }
                                 };
                         prog->enqueue_after_termination(start_prog_task);
                     } else {
-                        PM_TINY_LOG_I("`%s` start timeout reboot now.", prog->name.c_str());
+                        PM_TINY_DLOG_INFO("`%s` start timeout reboot now.", prog->name.c_str());
                         pm_tiny::process_reboot();
                         reboot = true;
                         break;
@@ -283,7 +301,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
             } else if (prog->state == PM_TINY_PROG_STATE_RUNING) {
                 if (prog->instance.pid != -1 && prog->is_tick_timeout()) {
                     if (prog->failure_action == pm_tiny::failure_action_t::RESTART) {
-                        PM_TINY_LOG_I("`%s` tick timeout restart now.", prog->name.c_str());
+                        PM_TINY_DLOG_INFO("`%s` tick timeout restart now.", prog->name.c_str());
                         prog->async_kill_prog();
                         auto start_prog_task =
                                 [&prog](pm_tiny_server_t &) {
@@ -293,23 +311,23 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                                     if (decision.restart) {
                                         ++prog->dead_count;
                                         prog->state = PM_TINY_PROG_STATE_WAITING_START;
-                                        PM_TINY_LOG_I("`%s` timeout restart scheduled in %dms (attempt %d)",
+                                        PM_TINY_DLOG_INFO("`%s` timeout restart scheduled in %dms (attempt %d)",
                                                       prog->name.c_str(), decision.delay_ms,
                                                       decision.attempts_in_window);
                                     } else {
                                         prog->state = PM_TINY_PROG_STATE_STOPED;
-                                        PM_TINY_LOG_E("`%s` timeout restart suppressed after %d attempts",
+                                        PM_TINY_DLOG_ERROR("`%s` timeout restart suppressed after %d attempts",
                                                       prog->name.c_str(), decision.attempts_in_window);
                                     }
                                 };
                         prog->enqueue_after_termination(start_prog_task);
                     } else if (prog->failure_action == pm_tiny::failure_action_t::REBOOT) {
-                        PM_TINY_LOG_I("`%s` tick timeout reboot now.", prog->name.c_str());
+                        PM_TINY_DLOG_INFO("`%s` tick timeout reboot now.", prog->name.c_str());
                         pm_tiny::process_reboot();
                         reboot = true;
                         break;
                     } else if (prog->failure_action == pm_tiny::failure_action_t::SKIP) {
-//                    PM_TINY_LOG_I("`%s` tick timeout skip.", prog->name.c_str());
+//                    PM_TINY_DLOG_INFO("`%s` tick timeout skip.", prog->name.c_str());
                     }
                 }
             }
@@ -333,9 +351,9 @@ void check_delayed_sigs(pm_tiny_server_t &tiny_server) {
     check_delayed_exit_sig(tiny_server);
     check_delayed_chld_sig(tiny_server);
     sig_atomic_t saved_hup = take_pending_signal(hup_signal, SIGHUP);
-    if (saved_hup) pm_tiny::logger->safe_signal_log(saved_hup);
+    if (saved_hup) pm_tiny::daemon_log_signal(saved_hup);
     sig_atomic_t saved_alarm = take_pending_signal(alarm_signal, SIGALRM);
-    if (saved_alarm) pm_tiny::logger->safe_signal_log(saved_alarm);
+    if (saved_alarm) pm_tiny::daemon_log_signal(saved_alarm);
 }
 
 void install_signal_handler(int signo, void (*handler)(int, siginfo_t *, void *)) {
@@ -344,7 +362,8 @@ void install_signal_handler(int signo, void (*handler)(int, siginfo_t *, void *)
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = handler;
     if (sigaction(signo, &act, nullptr) == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigaction %d", signo);
+        PM_TINY_DLOG_ERROR_ERRNO("sigaction %d", signo);
+        std::exit(EXIT_FAILURE);
     }
 }
 
@@ -356,13 +375,45 @@ void install_signal_handlers() {
     install_signal_handler(SIGALRM, sig_alarm_handler);
 }
 
+int next_maintenance_delay_ms(const pm_tiny_server_t &server) {
+    if (exit_signal || alarm_signal || hup_signal || exit_chld_signal) return 0;
+    if (server.is_exiting()) return 25;
+    if (server.persistence_busy()) return 10;
+    const int64_t now = pm_tiny::time::gettime_monotonic_ms();
+    int64_t next_due = now + 1000;
+    bool tree_draining = false;
+    for (const auto &prog : server.pm_tiny_progs) {
+        if (prog->restart_pending) next_due = std::min(next_due, prog->restart_due_ms);
+        if (prog->state == PM_TINY_PROG_STATE_STARTING && prog->instance.pid != -1 &&
+            prog->start_timeout >= 0) {
+            next_due = std::min(next_due, prog->last_startup_ms +
+                static_cast<int64_t>(prog->start_timeout) * 1000);
+        }
+        if (prog->state == PM_TINY_PROG_STATE_RUNING && prog->heartbeat_timeout > 0) {
+            next_due = std::min(next_due, prog->last_tick_timepoint +
+                static_cast<int64_t>(prog->heartbeat_timeout) * 1000);
+        }
+        const auto phase = prog->instance.job.phase();
+        if (phase == pm_tiny::termination_phase::term_requested) {
+            next_due = std::min(next_due, prog->instance.job.deadline_ms());
+        } else if (phase == pm_tiny::termination_phase::tree_draining ||
+                   phase == pm_tiny::termination_phase::force_kill_requested) {
+            tree_draining = true;
+        }
+    }
+    if (tree_draining) return 25;
+    if (next_due <= now) return 1;
+    return static_cast<int>(std::min<int64_t>(1000, next_due - now));
+}
+
 int open_uds_listen_fd(const std::string &sock_path
                        ,bool enable_abstract_namespace) {
     int sfd;
     struct sockaddr_un my_addr{};
     sfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sfd == -1) {
-        pm_tiny::logger->syscall_fatal("socket");
+        PM_TINY_DLOG_ERROR_ERRNO("socket");
+        std::exit(EXIT_FAILURE);
     };
 
     memset(&my_addr, 0, sizeof(struct sockaddr_un));
@@ -379,28 +430,44 @@ int open_uds_listen_fd(const std::string &sock_path
     }
     int rc = pm_tiny::set_nonblock(sfd);
     if (rc < 0) {
-        pm_tiny::logger->syscall_fatal("fcntl");
+        PM_TINY_DLOG_ERROR_ERRNO("fcntl");
+        std::exit(EXIT_FAILURE);
     }
     rc = pm_tiny::set_cloexec(sfd);
     if (rc < 0) {
-        pm_tiny::logger->syscall_fatal("set_cloexec");
+        PM_TINY_DLOG_ERROR_ERRNO("set_cloexec");
+        std::exit(EXIT_FAILURE);
     }
     if (bind(sfd, (struct sockaddr *) &my_addr,addr_length) == -1) {
-        pm_tiny::logger->syscall_fatal("bind");
+        PM_TINY_DLOG_ERROR_ERRNO("bind");
+        std::exit(EXIT_FAILURE);
     }
 
     if (listen(sfd, 5) == -1) {
-        pm_tiny::logger->syscall_fatal("listen");
+        PM_TINY_DLOG_ERROR_ERRNO("listen");
+        std::exit(EXIT_FAILURE);
     }
     return sfd;
 }
 
 int check_quit_or_reload(pm_tiny_server_t &pm_tiny_server) {
+    int save_result = -1;
+    if (pm_tiny_server.poll_save_proc_to_cfg(save_result)) {
+        for (auto &weak_session : pm_tiny_server.wait_save_sessions) {
+            auto session = weak_session.lock();
+            if (!session || session->is_close()) continue;
+            auto response = std::make_unique<pm_tiny::frame_t>();
+            pm_tiny::fappend_value<int>(*response, save_result == 0 ? 0 : 1);
+            pm_tiny::fappend_value(*response, save_result == 0 ? "save success" : "save fail");
+            session->write_frame(response);
+        }
+        pm_tiny_server.wait_save_sessions.clear();
+    }
     auto pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
     auto living_processes_count = get_living_processes_count(pm_tiny_progs);
     if (pm_tiny_server.is_exiting()) {
-//        PM_TINY_LOG_D("==>prog_num:%d", living_processes_count);
-        if (living_processes_count == 0) {
+//        PM_TINY_DLOG_DEBUG("==>prog_num:%d", living_processes_count);
+        if (living_processes_count == 0 && !pm_tiny_server.persistence_busy()) {
             if (!pm_tiny_server.reload_config) {
                 return 1;
             }
@@ -436,7 +503,7 @@ int check_quit_or_reload(pm_tiny_server_t &pm_tiny_server) {
 }
 
 void start(pm_tiny_server_t &pm_tiny_server) {
-    PM_TINY_LOG_D("pm_tiny pid:%d\n", getpid());
+    PM_TINY_DLOG_DEBUG("pm_tiny pid:%d\n", getpid());
     int rc = 0;
     auto sock_path = pm_tiny_server.pm_tiny_sock_file;
     if (!pm_tiny_server.uds_abstract_namespace) {
@@ -444,7 +511,8 @@ void start(pm_tiny_server_t &pm_tiny_server) {
     }
     rc = pm_tiny::set_sigaction(SIGPIPE, SIG_IGN);
     if (rc == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigaction SIGPIPE");
+        PM_TINY_DLOG_ERROR_ERRNO("sigaction SIGPIPE");
+        std::exit(EXIT_FAILURE);
     }
     int sock_fd = open_uds_listen_fd(sock_path,
                                      pm_tiny_server.uds_abstract_namespace);
@@ -455,25 +523,52 @@ void start(pm_tiny_server_t &pm_tiny_server) {
 
     pm_tiny_server.show_prog_depends_info();
 
+    int signal_pipe[2]{-1, -1};
+    if (::pipe(signal_pipe) != 0 || pm_tiny::set_nonblock(signal_pipe[0]) != 0 ||
+        pm_tiny::set_nonblock(signal_pipe[1]) != 0 || pm_tiny::set_cloexec(signal_pipe[0]) != 0 ||
+        pm_tiny::set_cloexec(signal_pipe[1]) != 0) {
+        PM_TINY_DLOG_ERROR_ERRNO("create signal wakeup pipe");
+        std::exit(EXIT_FAILURE);
+    }
+    signal_wakeup_fd = signal_pipe[1];
     install_signal_handlers();
     pm_tiny_server.spawn();
     std::vector<pm_tiny::session_ptr_t> &sessions = pm_tiny_server.sessions;
     sigset_t osigmask;
     rc = sigprocmask(SIG_SETMASK, nullptr, &osigmask);
     if (rc == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigprocmask");
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask");
+        std::exit(EXIT_FAILURE);
     }
     if (sigprocmask(SIG_SETMASK, &osigmask, nullptr) == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigprocmask");
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask");
+        std::exit(EXIT_FAILURE);
     }
-    auto maintenance = [&pm_tiny_server]() {
+    auto maintenance = [&pm_tiny_server]() -> int {
         check_delayed_sigs(pm_tiny_server);
-        return check_quit_or_reload(pm_tiny_server) != 0;
+        if (check_quit_or_reload(pm_tiny_server) != 0) return -1;
+        return next_maintenance_delay_ms(pm_tiny_server);
     };
-    pm_tiny::asio_daemon_loop event_loop(pm_tiny_server, sock_fd, maintenance);
+    pm_tiny::asio_daemon_loop event_loop(pm_tiny_server, sock_fd, signal_pipe[0], maintenance);
     event_loop.run();
+    sigset_t shutdown_signals;
+    sigemptyset(&shutdown_signals);
+    sigaddset(&shutdown_signals, SIGTERM);
+    sigaddset(&shutdown_signals, SIGINT);
+    sigaddset(&shutdown_signals, SIGCHLD);
+    sigaddset(&shutdown_signals, SIGHUP);
+    sigaddset(&shutdown_signals, SIGALRM);
+    if (sigprocmask(SIG_BLOCK, &shutdown_signals, nullptr) == -1) {
+        PM_TINY_DLOG_ERROR_ERRNO("block signals before wakeup pipe shutdown");
+        std::exit(EXIT_FAILURE);
+    }
+    signal_wakeup_fd = -1;
+    close(signal_pipe[0]);
+    close(signal_pipe[1]);
+    pm_tiny_server.wait_for_persistence();
     if (sigprocmask(SIG_SETMASK, &osigmask, nullptr) == -1) {
-        PM_TINY_LOG_FATAL_SYS("sigprocmask");
+        PM_TINY_DLOG_ERROR_ERRNO("sigprocmask");
+        std::exit(EXIT_FAILURE);
     }
     auto &pm_tiny_progs = pm_tiny_server.pm_tiny_progs;
     pm_tiny_server.kill_all_prog();
@@ -490,7 +585,7 @@ void start(pm_tiny_server_t &pm_tiny_server) {
     if (!pm_tiny_server.uds_abstract_namespace) {
         unlink(sock_path.c_str());
     }
-    PM_TINY_LOG_I("pm_tiny exit");
+    PM_TINY_DLOG_INFO("pm_tiny exit");
 }
 
 int create_lock_pid_file(const char *filepath) {
@@ -553,115 +648,153 @@ static void daemonize() {
     }
 }
 
-struct command_args {
-    int daemon = 0;
-    std::string cfg_file;
-};
-
-int parse_command_args(int argc, char **argv,
-                       struct command_args &args) {
-    int index;
-    int c;
-    opterr = 0;
-    while ((c = getopt(argc, argv, "dc:")) != -1)
-        switch (c) {
-            case 'd':
-                args.daemon = 1;
-                break;
-            case 'c':
-                args.cfg_file = optarg;
-                break;
-            case '?':
-                if (isprint(optopt))
-                    fprintf(stderr, "Unknown option `%c`.\n", optopt);
-                else
-                    fprintf(stderr, "Unknown option character `\\x%x`.\n", optopt);
-                return 1;
-            default:
-                exit(EXIT_FAILURE);
+static bool create_directory_tree(const std::string &path) {
+    if (path.empty()) return false;
+    std::string current;
+    std::size_t offset = 0;
+    if (path.front() == '/') {
+        current = "/";
+        offset = 1;
+    }
+    while (offset <= path.size()) {
+        const auto slash = path.find('/', offset);
+        const std::string part = path.substr(offset, slash == std::string::npos ?
+                                                     std::string::npos : slash - offset);
+        if (!part.empty() && part != ".") {
+            if (!current.empty() && current.back() != '/') current += '/';
+            current += part;
+            if (mkdir(current.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0 && errno != EEXIST) {
+                return false;
+            }
         }
-
-    for (index = optind; index < argc; index++)
-        fprintf(stderr, "Non-option argument %s\n", argv[index]);
-    return 0;
+        if (slash == std::string::npos) break;
+        offset = slash + 1;
+    }
+    return true;
 }
 
-
 int main(int argc, char *argv[]) {
-    pm_tiny::initialize();
-    command_args args;
-    int rc = 0;
     int exists = 0;
-    parse_command_args(argc, argv, args);
-    char cfg_path[PATH_MAX] = {0};
-    if (!args.cfg_file.empty()) {
-        if (realpath(args.cfg_file.c_str(), cfg_path) == nullptr) {
-            PM_TINY_LOG_E_SYS("%s realpath", args.cfg_file.c_str());
-            exit(EXIT_FAILURE);
+    const auto parsed = pm_tiny::parse_daemon_arguments(argc, argv, pm_tiny::daemon_platform::posix);
+    if (!parsed.success) {
+        std::fprintf(stderr, "pm_tiny: %s\n\n%s", parsed.error.c_str(),
+                     pm_tiny::daemon_usage(argc > 0 ? argv[0] : "pm_tiny",
+                                           pm_tiny::daemon_platform::posix).c_str());
+        return 2;
+    }
+    if (parsed.options.help) {
+        std::fputs(pm_tiny::daemon_usage(argc > 0 ? argv[0] : "pm_tiny",
+                                         pm_tiny::daemon_platform::posix).c_str(), stdout);
+        return EXIT_SUCCESS;
+    }
+    if (parsed.options.version) {
+        std::printf("pm_tiny %s\n", PM_TINY_VERSION);
+        return EXIT_SUCCESS;
+    }
+    const auto resolved = pm_tiny::resolve_daemon_config(parsed.options,
+                                                         pm_tiny::daemon_platform::posix);
+    if (!resolved.success) {
+        std::fprintf(stderr, "pm_tiny: %s\n", resolved.error.c_str());
+        return EXIT_FAILURE;
+    }
+    const auto &pm_tiny_cfg = resolved.config;
+    std::string environment_error;
+    const std::pair<const char *, std::string> exported[] = {
+        {PM_TINY_HOME, pm_tiny_cfg.home_dir},
+        {PM_TINY_LOG_FILE, pm_tiny_cfg.log_file},
+        {PM_TINY_PROG_CFG_FILE, pm_tiny_cfg.program_config_file},
+        {PM_TINY_APP_LOG_DIR, pm_tiny_cfg.app_log_dir},
+        {PM_TINY_APP_ENVIRON_DIR, pm_tiny_cfg.app_environ_dir},
+        {PM_TINY_SOCK_FILE, pm_tiny_cfg.socket_file},
+        {PM_TINY_UDS_ABSTRACT_NAMESPACE, pm_tiny_cfg.uds_abstract_namespace ? "1" : "0"},
+        {PM_TINY_PROCESS_TREE_MODE, pm_tiny_cfg.process_tree_mode},
+        {PM_TINY_CGROUP_ROOT, pm_tiny_cfg.cgroup_root},
+        {PM_TINY_LOG_LEVEL, pm_tiny_cfg.log_level},
+        {PM_TINY_LOG_MAX_SIZE_KB, std::to_string(pm_tiny_cfg.log_max_size_kb)},
+        {PM_TINY_LOG_ARCHIVE_COUNT, std::to_string(pm_tiny_cfg.log_archive_count)}
+    };
+    for (const auto &entry : exported) {
+        if (!pm_tiny::set_daemon_environment(entry.first, entry.second, environment_error)) {
+            std::fprintf(stderr, "pm_tiny: %s\n", environment_error.c_str());
+            return EXIT_FAILURE;
         }
     }
-    auto pm_tiny_cfg = pm_tiny::get_pm_tiny_config(cfg_path);
-    std::string pm_tiny_home_dir = pm_tiny_cfg->pm_tiny_home_dir;
-    std::string pm_tiny_lock_file = pm_tiny_cfg->pm_tiny_lock_file;
+    const std::string &pm_tiny_home_dir = pm_tiny_cfg.home_dir;
+    const std::string &pm_tiny_lock_file = pm_tiny_cfg.lock_file;
     exists = pm_tiny::is_directory_exists(pm_tiny_home_dir.c_str());
-    PM_TINY_LOG_D("pm_tiny home:%s", pm_tiny_home_dir.c_str());
+    PM_TINY_DLOG_DEBUG("pm_tiny home:%s", pm_tiny_home_dir.c_str());
     if (exists == -1) {
         perror("is_directory_exists");
         exit(EXIT_FAILURE);
     }
     if (!exists) {
-        rc = mkdir(pm_tiny_home_dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
-        if (rc == -1) {
-            PM_TINY_LOG_E_SYS("mkdir %s", pm_tiny_home_dir.c_str());
+        if (!create_directory_tree(pm_tiny_home_dir)) {
+            PM_TINY_DLOG_ERROR_ERRNO("mkdir %s", pm_tiny_home_dir.c_str());
             exit(EXIT_FAILURE);
         }
     }
-    std::string pm_tiny_log_file = pm_tiny_cfg->pm_tiny_log_file;
-    std::string pm_tiny_prog_cfg_file = pm_tiny_cfg->pm_tiny_prog_cfg_file;
-    std::string pm_tiny_app_log_dir = pm_tiny_cfg->pm_tiny_app_log_dir;
-    std::string pm_tiny_app_environ_dir = pm_tiny_cfg->pm_tiny_app_environ_dir;
+    const std::string &pm_tiny_log_file = pm_tiny_cfg.log_file;
+    const std::string &pm_tiny_prog_cfg_file = pm_tiny_cfg.program_config_file;
+    const std::string &pm_tiny_app_log_dir = pm_tiny_cfg.app_log_dir;
+    const std::string &pm_tiny_app_environ_dir = pm_tiny_cfg.app_environ_dir;
     auto mkdir_if_need = [](const std::string &dir) {
         int exists = pm_tiny::is_directory_exists(dir.c_str());
         if (exists == -1) {
-            pm_tiny::logger->syscall_errorlog("is_directory_exists");
+            PM_TINY_DLOG_ERROR_ERRNO("is_directory_exists");
             exit(EXIT_FAILURE);
         }
         if (!exists) {
-            int rc = mkdir(dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
-            if (rc == -1) {
-                pm_tiny::logger->syscall_errorlog("mkdir %s", dir.c_str());
+            if (!create_directory_tree(dir)) {
+                PM_TINY_DLOG_ERROR_ERRNO("mkdir %s", dir.c_str());
                 exit(EXIT_FAILURE);
             }
         }
     };
     mkdir_if_need(pm_tiny_app_log_dir);
     mkdir_if_need(pm_tiny_app_environ_dir);
-    if (args.daemon) {
+    if (parsed.options.daemonize) {
         daemonize();
     }
-    pm_tiny::logger = std::make_unique<pm_tiny::logger_t>(pm_tiny_log_file.c_str());
+    pm_tiny::daemon_log_level_t minimum_level;
+    if (!pm_tiny::parse_daemon_log_level(pm_tiny_cfg.log_level, minimum_level)) {
+        std::fprintf(stderr, "pm_tiny: invalid log level: %s\n", pm_tiny_cfg.log_level.c_str());
+        return EXIT_FAILURE;
+    }
+    pm_tiny::daemon_log_config_t log_config;
+    log_config.path = pm_tiny_log_file;
+    log_config.max_size_bytes = static_cast<std::size_t>(pm_tiny_cfg.log_max_size_kb) * 1024U;
+    log_config.archive_count = pm_tiny_cfg.log_archive_count;
+    log_config.mirror_console = !parsed.options.daemonize;
+    log_config.minimum_level = minimum_level;
+    std::string log_error;
+    pm_tiny::configure_daemon_log(log_config, log_error);
     int lock_fp = create_lock_pid_file(pm_tiny_lock_file.c_str());
     if (lock_fp < 0) {
         exit(EXIT_FAILURE);
     }
     pm_tiny_server_t pm_tiny_server;
+    pm_tiny_server.effective_daemon_config = pm_tiny_cfg;
+    pm_tiny_server.daemon_options = parsed.options;
+    pm_tiny_server.started_monotonic_ms = pm_tiny::time::gettime_monotonic_ms();
     pm_tiny_server.pm_tiny_home_dir = pm_tiny_home_dir;
     pm_tiny_server.pm_tiny_prog_cfg_file = pm_tiny_prog_cfg_file;
     pm_tiny_server.pm_tiny_log_file = pm_tiny_log_file;
     pm_tiny_server.pm_tiny_app_log_dir = pm_tiny_app_log_dir;
     pm_tiny_server.pm_tiny_app_environ_dir = pm_tiny_app_environ_dir;
-    pm_tiny_server.pm_tiny_sock_file = pm_tiny_cfg->pm_tiny_sock_file;
-    pm_tiny_server.uds_abstract_namespace = pm_tiny_cfg->uds_abstract_namespace;
+    pm_tiny_server.pm_tiny_sock_file = pm_tiny_cfg.socket_file;
+    pm_tiny_server.uds_abstract_namespace = pm_tiny_cfg.uds_abstract_namespace;
+    pm_tiny_server.allowed_uids = pm_tiny_cfg.allowed_uids;
+    pm_tiny_server.allowed_gids = pm_tiny_cfg.allowed_gids;
     pm_tiny_server.pm_tiny_lock_file = pm_tiny_lock_file;
-    if (!pm_tiny_server.init_process_tree(pm_tiny_cfg->process_tree_mode,
-                                          pm_tiny_cfg->cgroup_root)) {
+    if (!pm_tiny_server.init_process_tree(pm_tiny_cfg.process_tree_mode,
+                                          pm_tiny_cfg.cgroup_root)) {
         delete_lock_pid_file(lock_fp, pm_tiny_lock_file.c_str());
         exit(EXIT_FAILURE);
     }
     try {
         pm_tiny_server.lmkdFd = pm_tiny::connect_lmkd();
     } catch (const std::exception &ex) {
-        PM_TINY_LOG_E("connect lmkd error:%s", ex.what());
+        PM_TINY_DLOG_ERROR("connect lmkd error:%s", ex.what());
     }
     start(pm_tiny_server);
     delete_lock_pid_file(lock_fp, pm_tiny_lock_file.c_str());

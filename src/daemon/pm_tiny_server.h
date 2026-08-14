@@ -27,7 +27,7 @@
 #include <tuple>
 #include <string.h>
 #include <stdarg.h>
-#include "logger.hpp"
+#include "daemon_log.h"
 #include <memory>
 #include "string_utils.h"
 #include <math.h>
@@ -40,6 +40,8 @@
 #include "procinfo.h"
 #include "prog.h"
 #include "pm_tiny_utility.h"
+#include "persistence_worker.h"
+#include "daemon_config.h"
 
 namespace pm_tiny {
     constexpr const char *pm_tiny_version = PM_TINY_VERSION;
@@ -69,6 +71,8 @@ namespace pm_tiny {
         std::string pm_tiny_lock_file;
         CloseableFd lmkdFd;
         bool uds_abstract_namespace;
+        std::vector<unsigned int> allowed_uids;
+        std::vector<unsigned int> allowed_gids;
         std::shared_ptr<process_tree_controller> process_tree;
         proglist_t pm_tiny_progs;
         dependency_graph dependency_graph_;
@@ -79,6 +83,13 @@ namespace pm_tiny {
         std::unique_ptr<reload_config_t> reload_config;
 
         std::vector<std::weak_ptr<pm_tiny::session_t>> wait_reload_sessions;
+        std::vector<std::weak_ptr<pm_tiny::session_t>> wait_save_sessions;
+        persistence_worker persistence;
+        daemon_config effective_daemon_config;
+        daemon_cli_options daemon_options;
+        std::int64_t started_monotonic_ms = 0;
+        bool subreaper_enabled = false;
+        std::string subreaper_error;
 
         int parse_cfg();
 
@@ -91,13 +102,8 @@ namespace pm_tiny {
 
         int parse_cfg(proglist_t &progs) const;
 
-        std::unique_ptr<prog_info_t> create_prog(const std::string &app_name,
-                               const std::string &cwd,
-                               const std::string &command,
-                               const std::vector<std::string> &envs,
-                               int kill_timeout_sec,
-                               const std::string&run_as,
-                               bool use_pty = true) const;
+        std::unique_ptr<prog_info_t> create_prog(const prog_cfg_t &config,
+                                                 const std::vector<std::string> &envs) const;
 
         int start_and_add_prog(const prog_ptr_t &prog);
 
@@ -106,6 +112,10 @@ namespace pm_tiny {
         void mark_dependency_stopped(const prog_ptr_t &prog);
 
         int save_proc_to_cfg();
+        bool begin_save_proc_to_cfg();
+        bool poll_save_proc_to_cfg(int &result);
+        bool persistence_busy() const;
+        void wait_for_persistence();
 
         void restart_startfailed();
 

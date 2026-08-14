@@ -142,7 +142,7 @@ wait_all_gone() {
 start_fixture() {
     local tag=$1 name=$2 mode=$3 pid_dir=$4
     remote_pm "$tag" start \
-        "\"$REMOTE_BASE/fixture.sh $mode $pid_dir\" --name '$name' --kill_timeout 2 --user root --no_daemon --no_pty" >/dev/null
+        "$name --kill-timeout 2 --user root --no-daemon --no-pty -- $REMOTE_BASE/fixture.sh $mode $pid_dir" >/dev/null
     for _ in $(seq 1 30); do
         if "${ADB[@]}" shell "test -f '$pid_dir/grandchild.pid'"; then return 0; fi
         sleep 0.1

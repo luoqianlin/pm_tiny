@@ -33,6 +33,7 @@ struct ProgCfgSerializeOptions {
 
 ProgCfgParseResult parse_prog_cfg_yaml_node(const YAML::Node &node, prog_cfg_t &out_cfg);
 ProgCfgDocumentParseResult parse_prog_cfg_yaml_document(const YAML::Node &root);
+bool is_effectively_empty_prog_cfg_yaml(const std::string &content);
 YAML::Node serialize_prog_cfg_yaml_node(const prog_cfg_t &cfg,
                                         const ProgCfgSerializeOptions &options = {});
 

@@ -9,7 +9,7 @@
 
 namespace pm_tiny {
 
-constexpr std::int32_t process_list_schema_version = 2;
+constexpr std::int32_t process_list_schema_version = 5;
 
 enum class pty_mode_t : std::int32_t {
     unsupported = -1,
@@ -21,7 +21,8 @@ struct process_list_entry {
     std::int64_t pid = -1;
     std::string name;
     std::string cwd;
-    std::string command;
+    std::string executable;
+    std::vector<std::string> args;
     std::int32_t restart_count = 0;
     std::int32_t state = 0;
     bool has_uptime = false;
@@ -36,6 +37,21 @@ struct process_list_entry {
     std::int32_t restart_attempts_in_window = 0;
     bool restart_suppressed = false;
     std::string restart_suppression_reason;
+    std::uint64_t generation = 0;
+    bool ready = false;
+    bool heartbeat_enabled = false;
+    bool has_last_exit = false;
+    std::string last_exit_reason;
+    std::int32_t last_exit_code = 0;
+    std::string process_tree_backend;
+    bool process_tree_degraded = false;
+    std::string process_tree_degradation_reason;
+    std::string config_source;
+    bool log_degraded = false;
+    std::uint64_t log_dropped_bytes = 0;
+    std::string log_last_error;
+    std::int64_t log_retry_remaining_ms = 0;
+    std::vector<std::string> log_paths;
 };
 
 void append_process_list(frame_t &frame, const std::vector<process_list_entry> &entries);

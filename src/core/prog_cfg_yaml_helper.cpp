@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cctype>
 #include <sstream>
 #include <utility>
 
@@ -125,9 +126,40 @@ bool validate_range(int value,
 
 } // namespace
 
+bool is_effectively_empty_prog_cfg_yaml(const std::string &content) {
+    std::size_t offset = 0;
+    if (content.size() >= 3 &&
+        static_cast<unsigned char>(content[0]) == 0xef &&
+        static_cast<unsigned char>(content[1]) == 0xbb &&
+        static_cast<unsigned char>(content[2]) == 0xbf) {
+        offset = 3;
+    }
+
+    while (offset < content.size()) {
+        while (offset < content.size() &&
+               std::isspace(static_cast<unsigned char>(content[offset]))) {
+            ++offset;
+        }
+        if (offset == content.size()) return true;
+        if (content[offset] != '#') return false;
+        while (offset < content.size() && content[offset] != '\n' && content[offset] != '\r') {
+            ++offset;
+        }
+    }
+    return true;
+}
+
 ProgCfgParseResult parse_prog_cfg_yaml_node(const YAML::Node &node, prog_cfg_t &out_cfg) {
     ProgCfgParseResult result;
     prog_cfg_t parsed;
+
+    for (const char *removed : {"log_size_kb", "log_files", "log_file", "log_file_count",
+                                "inherited_env"}) {
+        if (node[removed]) {
+            result.error = std::string("Config uses removed field `") + removed + "`";
+            return result;
+        }
+    }
 
     if (!read_required_string(node, "name", parsed.name, result)) {
         return result;
@@ -135,9 +167,14 @@ ProgCfgParseResult parse_prog_cfg_yaml_node(const YAML::Node &node, prog_cfg_t &
     if (!read_required_string(node, "cwd", parsed.cwd, result)) {
         return result;
     }
-    if (!read_required_string(node, "command", parsed.command, result)) {
+    if (node["command"]) {
+        result.error = "Program `" + parsed.name + "` uses removed field `command`; use `executable` and `args`";
         return result;
     }
+    if (!read_required_string(node, "executable", parsed.executable, result)) {
+        return result;
+    }
+    parsed.args = parse_string_sequence(node["args"], result, "args", parsed.name);
 
     if (auto kill_timeout = node["kill_timeout_s"]) {
         if (!read_optional_int(node, "kill_timeout_s", parsed.kill_timeout_s, result, parsed.name)) {
@@ -167,6 +204,15 @@ ProgCfgParseResult parse_prog_cfg_yaml_node(const YAML::Node &node, prog_cfg_t &
 
     parsed.depends_on = parse_string_sequence(node["depends_on"], result, "depends_on", parsed.name);
     parsed.env_vars = parse_string_sequence(node["env_vars"], result, "env_vars", parsed.name);
+    for (const auto &entry : parsed.env_vars) {
+        const auto equal = entry.find('=');
+        const std::string key = equal == std::string::npos ? entry : entry.substr(0, equal);
+        if (key.compare(0, 8, "PM_TINY_") == 0) {
+            result.error = "Program `" + parsed.name +
+                           "` cannot override reserved environment variable `" + key + "`";
+            return result;
+        }
+    }
 
     if (!read_optional_int(node, "start_timeout", parsed.start_timeout, result, parsed.name)) {
         return result;
@@ -237,7 +283,7 @@ ProgCfgParseResult parse_prog_cfg_yaml_node(const YAML::Node &node, prog_cfg_t &
         }
     }
 
-    // Optional: pty flag, default to true if absent
+    // PTY is opt-in in 3.0.
     if (auto pty_node = node["pty"]) {
         try {
             parsed.pty = pty_node.as<bool>();
@@ -247,6 +293,32 @@ ProgCfgParseResult parse_prog_cfg_yaml_node(const YAML::Node &node, prog_cfg_t &
             result.error = oss.str();
             return result;
         }
+    }
+
+    const bool explicit_log_mode = static_cast<bool>(node["log_mode"]);
+    if (explicit_log_mode) {
+        std::string value;
+        if (!read_optional_string(node, "log_mode", value, result, parsed.name)) return result;
+        if (!parse_log_mode(value, parsed.log_mode)) {
+            result.error = "Program `" + parsed.name + "` field `log_mode` must be `split` or `combined`";
+            return result;
+        }
+    } else if (parsed.pty) {
+        parsed.log_mode = log_mode_t::combined;
+    }
+    if (parsed.pty && parsed.log_mode == log_mode_t::split) {
+        result.error = "Program `" + parsed.name + "` cannot use `pty: true` with `log_mode: split`";
+        return result;
+    }
+    if (!read_optional_string(node, "log_dir", parsed.log_dir, result, parsed.name) ||
+        !read_optional_string(node, "log_file_name", parsed.log_file_name, result, parsed.name) ||
+        !read_optional_int(node, "log_max_size_kb", parsed.log_max_size_kb, result, parsed.name) ||
+        !read_optional_int(node, "log_archive_count", parsed.log_archive_count, result, parsed.name)) {
+        return result;
+    }
+    if (!validate_range(parsed.log_max_size_kb, 1, 1048576, "log_max_size_kb", result, parsed.name) ||
+        !validate_range(parsed.log_archive_count, 0, 100, "log_archive_count", result, parsed.name)) {
+        return result;
     }
 
     if (!result.warnings.empty()) {
@@ -293,7 +365,8 @@ YAML::Node serialize_prog_cfg_yaml_node(const prog_cfg_t &cfg,
     YAML::Node node;
     node["name"] = cfg.name;
     node["cwd"] = cfg.cwd;
-    node["command"] = cfg.command;
+    node["executable"] = cfg.executable;
+    node["args"] = cfg.args;
     node["env_vars"] = cfg.env_vars;
     node["kill_timeout_s"] = cfg.kill_timeout_s;
     if (options.include_run_as) node["user"] = cfg.run_as;
@@ -304,6 +377,11 @@ YAML::Node serialize_prog_cfg_yaml_node(const prog_cfg_t &cfg,
     node["heartbeat_timeout"] = cfg.heartbeat_timeout;
     if (options.include_oom_score_adj) node["oom_score_adj"] = cfg.oom_score_adj;
     if (options.include_pty) node["pty"] = cfg.pty;
+    node["log_mode"] = log_mode_name(cfg.log_mode);
+    if (!cfg.log_dir.empty()) node["log_dir"] = cfg.log_dir;
+    if (!cfg.log_file_name.empty()) node["log_file_name"] = cfg.log_file_name;
+    node["log_max_size_kb"] = cfg.log_max_size_kb;
+    node["log_archive_count"] = cfg.log_archive_count;
     node["restart_delay_ms"] = cfg.restart_delay_ms;
     node["restart_max_delay_ms"] = cfg.restart_max_delay_ms;
     node["restart_window_ms"] = cfg.restart_window_ms;

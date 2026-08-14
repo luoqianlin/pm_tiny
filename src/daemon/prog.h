@@ -27,7 +27,7 @@
 #include <tuple>
 #include <string.h>
 #include <stdarg.h>
-#include "logger.hpp"
+#include "daemon_log.h"
 #include <memory>
 #include <cstdint>
 #include "string_utils.h"
@@ -46,7 +46,9 @@
 #include <unordered_set>
 #include "pm_tiny_utility.h"
 #include "platform/linux/process_tree_controller.h"
-#include "termination_job.h"
+#include "core/termination_job.h"
+#include "program_log.h"
+#include "rotating_log_writer.h"
 namespace pm_tiny {
     struct managed_process_instance {
         uint64_t generation = 0;
@@ -95,19 +97,25 @@ namespace pm_tiny {
         managed_process_instance instance;
         std::shared_ptr<process_tree_controller> tree_controller;
         int rpipefd[2]{-1, -1};
+        std::string executable;
         std::vector<std::string> args;
         int64_t last_startup_ms = 0;
         int64_t last_dead_time_ms = 0;
         int last_wstatus = 0;
+        bool has_last_exit = false;
         int dead_count = 0;
         int dead_count_timer = 0;
         std::string name;
         std::string logfile[2];
         std::string work_dir;
-        int logfile_fd[2]{-1, -1};
-        int64_t logfile_size[2]{0, 0};//bytes
-        int64_t logfile_maxsize = 4 * 1024 * 1024L;
-        int logfile_count = 3;
+        std::unique_ptr<rotating_log_writer> log_writers[2];
+        log_mode_t log_mode = log_mode_t::split;
+        std::string log_dir;
+        std::string log_file_name;
+        int log_max_size_kb = 4096;
+        int log_archive_count = 3;
+        bounded_log_tail log_tail;
+        log_sink_health log_health;
         int64_t moniter_duration_threshold = 60 * 1000L;
         int64_t min_lifetime_threshold = 100L;
         int moniter_duration_max_dead_count = -1;
@@ -122,8 +130,6 @@ namespace pm_tiny {
         std::vector<std::string> env_vars;
         int oom_score_adj;
 
-        const int MAX_CACHE_LOG_LEN = 4096;//4kb
-        std::vector<char> cache_log;
         std::string residual_log;
 
         std::vector<std::string> depends_on;
@@ -132,8 +138,11 @@ namespace pm_tiny {
         bool daemon = true;
         int heartbeat_timeout = -1;//The unit is second, its value <=0 means disable
         int64_t last_tick_timepoint = 0;//milliseconds
-        // 是否为该程序关联 pty（伪终端）；默认 true 以兼容历史行为
-        bool use_pty = true;
+        bool use_pty = false;
+        std::string process_tree_backend;
+        bool process_tree_degraded = false;
+        std::string process_tree_degradation_reason;
+        std::string config_source = "file";
 
         std::vector<session_t *> sessions;
 
@@ -174,8 +183,6 @@ namespace pm_tiny {
 
         void write_cache_log_to_session(session_t *session);
 
-        bool is_sessions_writeable();
-
         void add_session(session_t *session);
 
         static std::string log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus);
@@ -200,7 +207,6 @@ namespace pm_tiny {
 
         void detach_sessions();
 
-        bool  is_cfg_equal(const prog_ptr_t prog)const;
     };
 
     inline void delete_prog(prog_ptr_t prog) {

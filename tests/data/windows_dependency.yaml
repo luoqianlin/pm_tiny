@@ -1,0 +1,13 @@
+- name: child
+  executable: powershell.exe
+  args: ["-NoProfile", "-Command", "Start-Sleep", "-Seconds", "60"]
+  cwd: '__WORK_DIR__'
+  daemon: false
+  depends_on:
+    - base
+
+- name: base
+  executable: powershell.exe
+  args: ["-NoProfile", "-Command", "Start-Sleep", "-Seconds", "60"]
+  cwd: '__WORK_DIR__'
+  daemon: false

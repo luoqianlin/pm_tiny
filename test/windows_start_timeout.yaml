@@ -1,5 +1,0 @@
-- name: never_ready
-  command: cmd.exe /c ping 127.0.0.1 -t
-  cwd: '__WORK_DIR__'
-  daemon: false
-  start_timeout: 1

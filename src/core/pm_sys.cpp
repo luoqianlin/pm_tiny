@@ -16,7 +16,7 @@
 #include <algorithm>
 
 
-#include "log.h"
+#include "daemon_log.h"
 #include "time_util.h"
 #include "globals.h"
 
@@ -206,7 +206,7 @@ namespace pm_tiny {
     int safe_kill_process(int pid, int tolerance_time) {
         int rc = kill(pid, SIGTERM);
         if (rc == -1) {
-            PM_TINY_LOG_E_SYS("kill pid:%d", pid);
+            PM_TINY_DLOG_ERROR_ERRNO("kill pid:%d", pid);
             return -1;
         }
         time::CElapsedTimer elapsedTimer;
@@ -214,15 +214,15 @@ namespace pm_tiny {
             return !pm_tiny::is_process_exists(pid);
         });
         if (pm_tiny::is_process_exists(pid)) {
-            PM_TINY_LOG_I("pid:%d still exists,force kill", pid);
+            PM_TINY_DLOG_INFO("pid:%d still exists,force kill", pid);
             rc = kill(pid, SIGKILL);
             if (rc == -1) {
-                PM_TINY_LOG_E_SYS("force kill pid:%d", pid);
+                PM_TINY_DLOG_ERROR_ERRNO("force kill pid:%d", pid);
             }
         }
         auto kill_cost = elapsedTimer.sec();
         if (kill_cost > 1) {
-            PM_TINY_LOG_I("kill pid:%d cost:%us", pid, kill_cost);
+            PM_TINY_DLOG_INFO("kill pid:%d cost:%us", pid, kill_cost);
         }
         return 0;
     }
@@ -251,7 +251,7 @@ namespace pm_tiny {
         if (page_size == 0) {
             page_size = sysconf(_SC_PAGESIZE);
             if (page_size <= 0) {
-                PM_TINY_LOG_E_SYS("could not read page size");
+                PM_TINY_DLOG_ERROR_ERRNO("could not read page size");
                 exit(EXIT_FAILURE);
             }
         }

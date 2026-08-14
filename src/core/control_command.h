@@ -2,7 +2,7 @@
 #define PM_TINY_CONTROL_COMMAND_H
 
 #include "frame_stream.hpp"
-#include "protocol_v2.h"
+#include "protocol_v3.h"
 
 #include <cstdint>
 #include <string>
@@ -23,6 +23,7 @@ enum class control_command : std::uint16_t {
     inspect = 0x33,
     reload = 0x34,
     quit = 0x35,
+    info = 0x36,
 };
 
 struct decoded_control_request {

@@ -53,7 +53,7 @@ try:
     item = next(item for item in data["processes"] if item["name"] == "crash_loop")
 except Exception:
     raise SystemExit(1)
-assert data["schema_version"] == 2
+assert data["schema_version"] == 3
 assert item["state"] == "stopped"
 assert item["restart_count"] == expected
 assert item["restart_pending"] is False
@@ -86,7 +86,7 @@ EOF
 cat > "$ARTIFACT_DIR/prog.yaml" <<EOF
 - name: crash_loop
   cwd: $REMOTE_BASE
-  command: ./crash_once.sh
+  executable: ./crash_once.sh
   start_timeout: 0
   daemon: true
   pty: false

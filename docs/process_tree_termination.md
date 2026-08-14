@@ -54,7 +54,7 @@ Android 验证时使用 `pm2`（系统的 `pm` 命令属于 Android 包管理器
 并比较生产进程的名称集合及 `online` 状态。日志、PID 和配置保存在
 `build/test-artifacts/android/<时间>-<serial>`，远端临时目录在退出时自动删除。
 
-重启策略回归使用独立测试实例，验证自动重启次数限制、抑制状态、`list --json` schema v2、
+重启策略回归使用独立测试实例，验证自动重启次数限制、抑制状态、`list --json` schema v3、
 `inspect` 运行时字段和手动恢复。测试不会替换或停止设备上的生产实例。
 
 可复现命令：

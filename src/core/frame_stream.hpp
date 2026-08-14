@@ -15,7 +15,7 @@
 #include <memory>
 #include <array>
 #include <limits>
-#include "protocol_v2.h"
+#include "protocol_v3.h"
 
 namespace pm_tiny {
 
@@ -104,7 +104,7 @@ namespace pm_tiny {
 
 
     inline void fappend_value(frame_t &f, const std::string &str) {
-        if (str.length() > protocol_v2_max_payload) {
+        if (str.length() > protocol_v3_max_payload) {
             throw std::length_error("string exceeds protocol maximum size");
         }
         fappend_value<std::uint32_t>(f, static_cast<std::uint32_t>(str.length()));
@@ -253,7 +253,7 @@ namespace pm_tiny {
             std::uint32_t len;
             fget_value<std::uint32_t>(len);
             StreamPositionGuard guard(addr_, sizeof(std::uint32_t));
-            if (len > protocol_v2_max_payload) {
+            if (len > protocol_v3_max_payload) {
                 throw BufferInsufficientException("String length exceeds protocol maximum.");
             }
             ensure_buffer_capacity(len);
@@ -277,6 +277,14 @@ namespace pm_tiny {
 
         const byte_t *get_addr() const {
             return addr_;
+        }
+
+        std::size_t remaining_size() const {
+            return static_cast<std::size_t>(frame_.data() + frame_.size() - addr_);
+        }
+
+        frame_t remaining_frame() const {
+            return frame_t(addr_, frame_.data() + frame_.size());
         }
 
     private:

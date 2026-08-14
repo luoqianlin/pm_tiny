@@ -12,7 +12,7 @@ PM_Tiny 的首要定位是面向嵌入式设备和边缘节点的轻量级、离
 
 - 依赖 DAG、异常重启、ready/tick 心跳、启动与心跳超时。
 - Linux/Android cgroup v2 进程树管理及进程组降级，Windows Job Object 进程树管理。
-- Unix Domain Socket / Windows named pipe 上的二进制协议 v2。
+- Unix Domain Socket / Windows named pipe 上的二进制协议 v3。
 - 动态 start/stop/restart/delete、save/reload、inspect、日志流和结构化进程列表。
 - 日志轮转、Linux systemd 集成、Windows SCM 服务化及三平台构建与回归验证手段。
 
@@ -46,8 +46,9 @@ GitHub Star、语言和功能数量只用于了解项目生态，不作为 PM_Ti
 - 显式重启策略已具备指数退避、最大延迟、时间窗口内最大次数、稳定运行复位、手动恢复及跨平台状态观测；后续补充最后退出原因和更完整的故障分类。
 - 增加 `pm validate`：只解析和校验配置、依赖图、路径及平台支持情况，不连接或修改运行实例。
 - 增加 `pm doctor`：检查 daemon/IPC、权限、配置来源、进程树后端和平台能力，不执行修复操作。
-- 继续扩展 `list --json` 和 `inspect`：当前已包含重启等待、剩余延迟、窗口次数和抑制原因，待增加最后退出原因、ready/heartbeat 状态、进程树后端与降级原因、有效配置来源。
-- 强化 IPC 权限：文件 socket 的权限及 peer credential、Windows named pipe ACL；文档明确 Linux abstract socket 的安全边界。
+- `list --json` 和 `inspect` 已使用跨平台公共 runtime snapshot，包含 generation、最后退出原因、
+  ready/heartbeat、进程树后端与降级原因、有效配置来源以及完整重启状态；后续继续补充故障分类。
+- 继续强化 IPC 权限：Linux/Android 已使用 `SO_PEERCRED` 和 UID/GID allowlist，Windows 已在每个 named pipe 实例应用 SDDL；后续补充部署身份检查和权限诊断输出。
 - 形成 Linux/Android 可复现安装产物和 Windows MSVC 发布包，提供版本核对、升级前检查及回滚步骤。
 
 进入下一阶段前必须满足：

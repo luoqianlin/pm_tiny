@@ -16,7 +16,7 @@
 #include <string>
 #include <type_traits>
 #include "frame_stream.hpp"
-#include "protocol_v2.h"
+#include "protocol_v3.h"
 
 namespace pm_tiny {
 
@@ -47,6 +47,8 @@ namespace pm_tiny {
         int get_fd_type() const;
 
         int sbuf_size() const;
+
+        std::size_t queued_bytes() const;
 
         int rbuf_size() const;
 
@@ -91,6 +93,7 @@ namespace pm_tiny {
         std::deque<frame_ptr_t> recv_buf = {};//last item as tmp buffer
         std::deque<protocol_message> recv_messages_ = {};
         std::deque<frame_ptr_t> send_buf = {};
+        std::size_t queued_bytes_ = 0;
         frame_t recv_frame_buf_;
         protocol_decoder decoder_;
         std::uint16_t current_message_type_ = 0;

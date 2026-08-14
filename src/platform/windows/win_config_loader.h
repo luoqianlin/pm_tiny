@@ -8,19 +8,15 @@
 namespace pm_tiny {
 namespace win {
 
-struct ProgramConfig : prog_cfg_t {
-    std::string log_dir = "logs";
-    std::string log_file_name;
-    int log_max_size_kb = 4096;
-    int log_file_count = 3;
-};
+struct ProgramConfig : prog_cfg_t {};
 
 struct ConfigLoadResult {
     std::vector<ProgramConfig> programs;
     std::string error_message;
 };
 
-ConfigLoadResult load_program_configs(const std::string &path);
+ConfigLoadResult load_program_configs(const std::string &program_config_path,
+                                      const std::string &app_environ_dir);
 
 } // namespace win
 } // namespace pm_tiny

@@ -1,4 +1,0 @@
-- name: unsupported_pty
-  command: cmd.exe /c exit 0
-  cwd: '__WORK_DIR__'
-  pty: true

@@ -16,7 +16,7 @@ It consists of the `pm_tiny` daemon and a command-line client: Linux and Windows
 - **Dependency orchestration**: Validate DAGs, start in stable topological order, block downstream nodes after dependency failures, and resume them after recovery.
 - **Automatic recovery**: Crash restart, exponential backoff, bounded restart windows, ready/tick heartbeats, and startup/heartbeat timeouts.
 - **Whole process-tree termination**: Linux/Android use cgroup v2 with process-group fallback; Windows uses Job Objects.
-- **Local IPC**: Linux/Android use Unix Domain Sockets and Windows uses named pipes, all carrying binary protocol v2.
+- **Local IPC**: Linux/Android use Unix Domain Sockets and Windows uses named pipes, all carrying binary protocol v3.
 - **Observable CLI**: Adaptive tables, JSON status, dependency graphs, inspection, log streaming, and actionable connection diagnostics.
 - **Offline deployment**: A C++14/CMake project with pinned bundled dependencies for disconnected device build environments.
 
@@ -24,7 +24,7 @@ It consists of the `pm_tiny` daemon and a command-line client: Linux and Windows
 
 ```mermaid
 flowchart LR
-    CLI[pm / Android pm2] -->|local IPC v2| Daemon[pm_tiny]
+    CLI[pm / Android pm2] -->|local IPC v3| Daemon[pm_tiny]
     Daemon --> DAG[Dependency graph and startup state]
     Daemon --> Runtime[Monitoring and recovery]
     Runtime --> Apps[Managed applications and descendants]
@@ -43,7 +43,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target pm_tiny pm
 
 ./build/pm_tiny &
-./build/pm start "/usr/bin/sleep 300" --name demo --no_daemon --no_pty
+./build/pm start demo --no-daemon --no-pty -- /usr/bin/sleep 300
 ./build/pm list
 ./build/pm graph
 ./build/pm stop demo
@@ -63,7 +63,7 @@ The default runtime directory is `~/.pm_tiny`, with process definitions in `~/.p
 | Hi3559A / AX620A | Cross-build support | `pm` | Platform Linux capabilities | [`toolchains/`](toolchains) |
 
 The Android CMake target remains named `pm`, so build it with `cmake --build <dir> --target pm`; the generated and installed device binary is `pm2`. This name only avoids the Android system command and is unrelated to the Node.js PM2 project.
-Android builds statically link libc++, so release binaries do not depend on `libc++_shared.so`.
+Android builds statically link libc++, so binaries do not depend on `libc++_shared.so`.
 
 ## Command Reference
 
@@ -71,7 +71,8 @@ Android builds statically link libc++, so release binaries do not depend on `lib
 | --- | --- |
 | `pm list [--wide\|--json] [--no-color]` | Show runtime status; replace `pm` with `pm2` on Android. |
 | `pm graph [name] [--json\|--dot]` | Show the full DAG or a focused upstream/downstream subgraph. |
-| `pm start <command> --name <name> [options]` | Dynamically add and start a process on Linux/Android. |
+| `pm start <name> [--log]` | Start an existing definition. |
+| `pm start <name> [options] -- <executable> [args...]` | Dynamically add and start a runtime definition on all three platforms. |
 | `pm start <name>` | Start a configured process and its dependency closure. |
 | `pm stop\|restart\|delete <name>` | Stop, restart, or remove a process. |
 | `pm log\|inspect <name>` | Stream logs or inspect configuration and runtime details. |
@@ -85,13 +86,13 @@ Use `pm --help` (`pm2 --help` on Android) for all options. `list --json` and `gr
 ```yaml
 - name: database
   cwd: /opt/app
-  command: ./database
+  executable: ./database
   daemon: true
   pty: false
 
 - name: api
   cwd: /opt/app
-  command: ./api
+  executable: ./api
   daemon: true
   pty: false
   depends_on: [database]
@@ -99,7 +100,18 @@ Use `pm --help` (`pm2 --help` on Android) for all options. `list --json` and `gr
   failure_action: restart
 ```
 
-`api` starts only after `database` becomes ready. Configuration load, dynamic addition, and reload reject missing, self, duplicate, and cyclic dependencies. See [`script/prog.yaml`](script/prog.yaml) for more fields.
+`api` starts only after `database` becomes ready. Configuration load, dynamic addition, and reload reject missing, self, duplicate, and cyclic dependencies. See [`examples/config/linux/prog.yaml`](examples/config/linux/prog.yaml) for more fields.
+
+Per-program logging defaults to `split`, producing `<name>_stdout.log` and `<name>_stderr.log`; set `log_mode: combined` for `<name>.log`. Linux/Android and Windows share `log_dir`, `log_file_name`, `log_max_size_kb`, `log_archive_count`, and the `.1` newest-archive rotation rule. Log-file failures do not stop the managed process; `pm list --json` and `pm inspect` expose degradation, dropped bytes, retry delay, and effective paths. Removed Windows log aliases are rejected.
+
+All three platforms use `pm_tiny.yaml` for daemon settings and `pm_tiny_prog_cfg_file` to select
+`prog.yaml`. Daemon logging uses `pm_tiny_log_file`, `pm_tiny_app_log_dir`,
+`pm_tiny_app_environ_dir`, `pm_tiny_log_level`, `pm_tiny_log_max_size_kb`, and
+`pm_tiny_log_archive_count`, with precedence CLI, environment, configuration, then built-in defaults.
+Windows supports `PM_TINY_HOME`: `%USERPROFILE%\.pm_tiny` for foreground use and
+`%ProgramData%\pm_tiny` for SCM installations. See
+[`docs/daemon_configuration.md`](docs/daemon_configuration.md). Windows release validation uses only
+VS 2022/MSVC x64.
 
 ## Build and Test
 
@@ -118,10 +130,14 @@ cmake --install build
 
 - [Dependency graph and startup state](docs/dependency_graph.md)
 - [Process-tree termination and Android constraints](docs/process_tree_termination.md)
-- [IPC protocol v2](docs/protocol_v2.md)
+- [IPC protocol v3](docs/protocol_v3.md)
+- [Daemon arguments, environment, and paths](docs/daemon_configuration.md)
 - [Windows port status and limitations](docs/windows_port_status.md)
+- [Project directory and test conventions](docs/project_structure.md)
 - [Project direction, comparisons, and roadmap](docs/project_roadmap.md)
-- [Benchmarks and project comparison](docs/benchmark.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
 PM_Tiny remains local-first, low-overhead, and offline deployable. It does not aim to replace systemd, Android init, or Windows SCM, and the core daemon will not embed a Web UI, cloud management plane, or container orchestration layer.
 

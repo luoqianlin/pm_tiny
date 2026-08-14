@@ -1,0 +1,33 @@
+- name: root
+  cwd: /data/local/tmp
+  executable: /system/bin/sleep
+  args: ["30"]
+  daemon: false
+  start_timeout: 2
+
+- name: child
+  cwd: /data/local/tmp
+  executable: /system/bin/sleep
+  args: ["30"]
+  daemon: false
+  depends_on:
+    - root
+
+- name: bad
+  cwd: /data/local/tmp
+  executable: /data/local/tmp/pm_tiny_missing_binary
+  daemon: false
+
+- name: blocked_child
+  cwd: /data/local/tmp
+  executable: /system/bin/sleep
+  args: ["30"]
+  daemon: false
+  depends_on:
+    - bad
+
+- name: side
+  cwd: /data/local/tmp
+  executable: /system/bin/sleep
+  args: ["30"]
+  daemon: false

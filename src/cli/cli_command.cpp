@@ -35,23 +35,6 @@ bool parse_integer(const std::string &text, int &value) {
     }
 }
 
-std::vector<std::string> split_dependencies(const std::string &value) {
-    std::vector<std::string> result;
-    std::size_t begin = 0;
-    while (begin <= value.size()) {
-        const auto comma = value.find(',', begin);
-        auto item = value.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
-        const auto first = item.find_first_not_of(" \t\r\n");
-        if (first != std::string::npos) {
-            const auto last = item.find_last_not_of(" \t\r\n");
-            result.push_back(item.substr(first, last - first + 1));
-        }
-        if (comma == std::string::npos) break;
-        begin = comma + 1;
-    }
-    return result;
-}
-
 command_parse_result failure(std::string message) {
     command_parse_result result;
     result.error = std::move(message);
@@ -59,21 +42,27 @@ command_parse_result failure(std::string message) {
 }
 
 command_parse_result parse_start(const std::vector<std::string> &args) {
-    if (args.size() < 3) return failure("start requires a command or configured process name");
+    if (args.size() < 3 || args[2].empty() || args[2][0] == '-') return failure("start requires an explicit process name");
 
     command_parse_result result;
     result.success = true;
     result.command.kind = command_kind::start;
-    result.command.start.command = args[2];
+    result.command.start.name = args[2];
     for (std::size_t i = 3; i < args.size(); ++i) {
         const auto &option = args[i];
+        if (option == "--") {
+            if (i + 1 >= args.size()) return failure("-- requires an executable");
+            result.command.start.create = true;
+            result.command.start.executable = args[++i];
+            result.command.start.args.assign(args.begin() + static_cast<std::ptrdiff_t>(i + 1), args.end());
+            return result;
+        }
         auto require_value = [&](std::string &target) -> bool {
             if (i + 1 >= args.size()) {
                 result = failure(option + " requires a value");
                 return false;
             }
             target = args[++i];
-            result.command.start.has_definition_options = true;
             return true;
         };
         auto require_integer = [&](int &target) -> bool {
@@ -86,23 +75,25 @@ command_parse_result parse_start(const std::vector<std::string> &args) {
             return true;
         };
 
-        if (option == "--name") {
-            if (!require_value(result.command.start.name)) return result;
-        } else if (option == "--kill_timeout") {
+        if (option == "--cwd") {
+            if (!require_value(result.command.start.cwd)) return result;
+        } else if (option == "--kill-timeout") {
             if (!require_integer(result.command.start.kill_timeout_sec)) return result;
         } else if (option == "--user") {
             if (!require_value(result.command.start.run_as)) return result;
-        } else if (option == "--env_var") {
+        } else if (option == "--env") {
             std::string value;
             if (!require_value(value)) return result;
-            result.command.start.env_vars.push_back(std::move(value));
-        } else if (option == "--depends_on") {
+            if (value.find('=') == std::string::npos || value[0] == '=') return failure("--env requires KEY=VALUE");
+            if (value.rfind("PM_TINY_", 0) == 0) return failure("--env cannot override reserved PM_TINY_* variables");
+            result.command.start.env.push_back(std::move(value));
+        } else if (option == "--depends-on") {
             std::string value;
             if (!require_value(value)) return result;
-            result.command.start.depends_on = split_dependencies(value);
-        } else if (option == "--start_timeout") {
+            result.command.start.depends_on.push_back(std::move(value));
+        } else if (option == "--start-timeout") {
             if (!require_integer(result.command.start.start_timeout)) return result;
-        } else if (option == "--failure_action") {
+        } else if (option == "--failure-action") {
             std::string value;
             if (!require_value(value)) return result;
             try {
@@ -110,24 +101,62 @@ command_parse_result parse_start(const std::vector<std::string> &args) {
             } catch (const std::exception &error) {
                 return failure(error.what());
             }
-        } else if (option == "--heartbeat_timeout") {
+        } else if (option == "--heartbeat-timeout") {
             if (!require_integer(result.command.start.heartbeat_timeout)) return result;
-        } else if (option == "--oom_score_adj") {
+        } else if (option == "--oom-score-adj") {
             if (!require_integer(result.command.start.oom_score_adj)) return result;
-        } else if (option == "--no_daemon") {
+        } else if (option == "--daemon") {
+            result.command.start.daemon = true;
+        } else if (option == "--no-daemon") {
             result.command.start.daemon = false;
-            result.command.start.has_definition_options = true;
         } else if (option == "--log") {
             result.command.start.show_log = true;
-            result.command.start.has_definition_options = true;
-        } else if (option == "--no_pty") {
+        } else if (option == "--log-mode") {
+            std::string value;
+            if (!require_value(value)) return result;
+            if (!parse_log_mode(value, result.command.start.log_mode))
+                return failure("--log-mode requires `split` or `combined`");
+            result.command.start.log_mode_explicit = true;
+        } else if (option == "--log-dir") {
+            if (!require_value(result.command.start.log_dir)) return result;
+        } else if (option == "--log-file-name") {
+            if (!require_value(result.command.start.log_file_name)) return result;
+        } else if (option == "--log-max-size-kb") {
+            if (!require_integer(result.command.start.log_max_size_kb)) return result;
+            if (result.command.start.log_max_size_kb < 1 || result.command.start.log_max_size_kb > 1048576)
+                return failure("--log-max-size-kb must be between 1 and 1048576");
+        } else if (option == "--log-archive-count") {
+            if (!require_integer(result.command.start.log_archive_count)) return result;
+            if (result.command.start.log_archive_count < 0 || result.command.start.log_archive_count > 100)
+                return failure("--log-archive-count must be between 0 and 100");
+        } else if (option == "--no-pty") {
             result.command.start.pty = false;
-            result.command.start.has_definition_options = true;
         } else if (option == "--pty") {
             result.command.start.pty = true;
-            result.command.start.has_definition_options = true;
+        } else if (option == "--restart-delay-ms") {
+            if (!require_integer(result.command.start.restart_delay_ms)) return result;
+        } else if (option == "--restart-max-delay-ms") {
+            if (!require_integer(result.command.start.restart_max_delay_ms)) return result;
+        } else if (option == "--restart-window-ms") {
+            if (!require_integer(result.command.start.restart_window_ms)) return result;
+        } else if (option == "--restart-max-attempts") {
+            if (!require_integer(result.command.start.restart_max_attempts)) return result;
+        } else if (option == "--restart-reset-after-ms") {
+            if (!require_integer(result.command.start.restart_reset_after_ms)) return result;
         } else {
             return failure("unknown start option: " + option);
+        }
+    }
+    if (!result.command.start.create) {
+        const auto &s = result.command.start;
+        if (!s.cwd.empty() || !s.run_as.empty() || !s.env.empty() || !s.depends_on.empty() || s.pty ||
+            !s.daemon || s.kill_timeout_sec != 3 || s.start_timeout != 0 ||
+            s.failure_action != failure_action_t::SKIP || s.heartbeat_timeout != -1 || s.oom_score_adj != 0 ||
+            s.restart_delay_ms != 1000 || s.restart_max_delay_ms != 30000 || s.restart_window_ms != 60000 ||
+            s.restart_max_attempts != 10 || s.restart_reset_after_ms != 60000 || s.log_mode_explicit ||
+            !s.log_dir.empty() || !s.log_file_name.empty() || s.log_max_size_kb != 4096 ||
+            s.log_archive_count != 3) {
+            return failure("definition options require `-- <executable> [args...]`");
         }
     }
     return result;
@@ -159,6 +188,13 @@ command_parse_result parse_command_line(const std::vector<std::string> &args) {
         return result;
     }
     if (name == "start") return parse_start(args);
+
+    if (name == "info") {
+        result.command.kind = command_kind::info;
+        if (args.size() == 3 && args[2] == "--json") result.command.info_json = true;
+        else if (args.size() != 2) return failure("unexpected info argument: " + args[2]);
+        return result;
+    }
 
     if (name == "list" || name == "ls" || name == "status") {
         result.command.kind = command_kind::list;
@@ -245,6 +281,7 @@ std::uint16_t command_protocol_type(command_kind kind) {
         case command_kind::inspect: return static_cast<std::uint16_t>(control_command::inspect);
         case command_kind::reload: return static_cast<std::uint16_t>(control_command::reload);
         case command_kind::quit: return static_cast<std::uint16_t>(control_command::quit);
+        case command_kind::info: return static_cast<std::uint16_t>(control_command::info);
         case command_kind::help: break;
     }
     throw std::invalid_argument("command has no protocol type");
@@ -256,23 +293,29 @@ std::string command_usage(const std::string &executable, bool dynamic_start_supp
         << "Commands:\n"
         << "  list|ls|status [--wide|--json] [--no-color]\n"
         << "  graph|dag [name] [--json|--dot] [--no-color]\n"
-        << "  start " << (dynamic_start_supported ? "<command> [process options]" : "<configured-name>") << "\n"
+        << "  start <name> [--log]\n"
+        << "  start <name> [options] -- <executable> [args...]\n"
         << "  stop <name>\n"
         << "  restart <name> [--log]\n"
         << "  delete <name>\n"
         << "  log <name>\n"
         << "  inspect <name>\n"
+        << "  info [--json]\n"
         << "  save\n"
         << "  reload\n"
         << "  quit\n"
         << "  version\n";
     if (dynamic_start_supported) {
         out << "\nProcess options:\n"
-            << "  --name <name> --kill_timeout <seconds> --user <user>\n"
-            << "  --env_var <key=value> --depends_on <app,...>\n"
-            << "  --start_timeout <seconds> --failure_action <skip|restart|reboot>\n"
-            << "  --heartbeat_timeout <seconds> --oom_score_adj <-1000..1000>\n"
-            << "  --no_daemon --log --pty|--no_pty\n";
+            << "  --cwd <path> --kill-timeout <seconds> --user <user>\n"
+            << "  --env <key=value> --depends-on <name>\n"
+            << "  --start-timeout <seconds> --failure-action <skip|restart|reboot>\n"
+            << "  --heartbeat-timeout <seconds> --oom-score-adj <-1000..1000>\n"
+            << "  --daemon|--no-daemon --log --pty|--no-pty\n"
+            << "  --log-mode split|combined --log-dir <dir> --log-file-name <name>\n"
+            << "  --log-max-size-kb <n> --log-archive-count <n>\n"
+            << "  --restart-delay-ms --restart-max-delay-ms --restart-window-ms\n"
+            << "  --restart-max-attempts --restart-reset-after-ms\n";
     }
     return out.str();
 }

@@ -3,27 +3,20 @@
 #include <windows.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "log_writer.h"
+#include "program_log.h"
+#include "rotating_log_writer.h"
 #include "win_config_loader.h"
 #include "restart_policy.h"
 #include "dependency_graph.h"
+#include "termination_job.h"
 
 namespace pm_tiny {
 namespace win {
-
-enum class TerminationPhase {
-    none,
-    graceful_requested,
-    force_kill_requested
-};
 
 enum class CompletionAction {
     automatic,
@@ -38,23 +31,31 @@ struct ProcessHandle {
     bool has_process = false;
     HANDLE job = nullptr;
 
-    HANDLE pipe_read = nullptr;
-    std::unique_ptr<LogWriter> log_writer;
-    std::thread log_thread;
-    std::shared_ptr<std::atomic_bool> log_thread_running = std::make_shared<std::atomic_bool>(false);
+    HANDLE pipe_read[2]{nullptr, nullptr};
+    std::unique_ptr<rotating_log_writer> log_writers[2];
+    bounded_log_tail log_tail;
+    log_sink_health log_health;
+    std::vector<std::string> log_paths;
+    bool log_pipe_eof[2]{false, false};
+    unsigned long long watched_log_generation[2]{0, 0};
     bool disable_restart = false;
     bool ready = false;
     unsigned long long launch_time_ms = 0;
     unsigned long long last_tick_ms = 0;
     unsigned long long generation = 0;
+    unsigned long long watched_generation = 0;
+    bool root_exit_observed = false;
+    unsigned long root_exit_code = STILL_ACTIVE;
+    bool has_last_exit = false;
+    unsigned long last_exit_code = 0;
     std::int32_t restart_count = 0;
-    TerminationPhase termination_phase = TerminationPhase::none;
+    termination_job termination;
     CompletionAction completion_action = CompletionAction::automatic;
-    unsigned long long termination_deadline_ms = 0;
     unsigned long termination_exit_code = 0;
     bool restart_pending = false;
     unsigned long long restart_due_ms = 0;
     restart_policy_state restart_state;
+    std::string config_source = "file";
 
     ProcessHandle() = default;
     ~ProcessHandle();
@@ -73,7 +74,6 @@ struct RuntimeControlState {
     dependency_runtime dependencies;
     bool reload_pending = false;
     std::vector<ProgramConfig> reload_programs;
-    std::condition_variable reload_completed;
 };
 
 bool rebuild_dependencies(RuntimeControlState &state,
@@ -86,6 +86,8 @@ std::vector<std::string> schedule_dependency_launch(std::vector<ProcessHandle> &
                                                     const std::vector<std::string> &names);
 
 bool launch_program(ProcessHandle &handle, std::string &error_message);
+void poll_program_log(ProcessHandle &handle);
+void append_program_log(ProcessHandle &handle, int stream_index, const char *data, std::size_t size);
 bool request_program_termination(ProcessHandle &handle,
                                  CompletionAction completion_action,
                                  unsigned long exit_code,
@@ -96,15 +98,6 @@ bool poll_program_termination(ProcessHandle &handle,
                               std::string &error_message);
 bool is_process_tree_empty(const ProcessHandle &handle, bool &tree_empty, std::string &error_message);
 bool force_terminate_program(ProcessHandle &handle, unsigned long exit_code, std::string &error_message);
-
-struct WaitResult {
-    bool has_event = false;
-    size_t index = 0;
-};
-
-WaitResult wait_for_handles(const std::vector<HANDLE> &handles,
-                            unsigned long timeout_ms,
-                            std::string &error_message);
 
 void terminate_all(std::vector<ProcessHandle> &processes, unsigned long wait_timeout_ms);
 unsigned long long monotonic_millis();

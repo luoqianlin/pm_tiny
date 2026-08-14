@@ -2,14 +2,13 @@ if (WIN32)
 add_library(pm_sdk
         AppClient.h
         AppClient_win.cpp
-        ../src/core/protocol_v2.cpp
         PM_Tiny_app_client.cpp
         )
 else()
 add_library(pm_sdk
-        AppClient.h AppClient.cpp ../src/core/session.cpp ../src/core/protocol_v2.cpp
+        AppClient.h AppClient.cpp ../src/core/session.cpp
         ../src/core/pm_sys.cpp ../src/core/frame_stream.hpp ../src/core/time_util.cpp
-        ../src/core/log.cpp ../src/core/memory_util.h ../src/core/memory_util.cpp
+        ../src/core/memory_util.h ../src/core/memory_util.cpp
         ../src/core/globals.cpp PM_Tiny_app_client.cpp)
 endif()
 target_include_directories(pm_sdk PUBLIC
@@ -18,7 +17,7 @@ target_include_directories(pm_sdk PUBLIC
         ../src/core/graph
 )
 target_compile_definitions(pm_sdk PRIVATE PM_TINY_API_EXPORTS)
-target_link_libraries(pm_sdk PRIVATE pm_tiny_asio)
+target_link_libraries(pm_sdk PRIVATE pm_tiny_asio pm_tiny_protocol pm_tiny_logging)
 if (WIN32)
 target_compile_definitions(pm_sdk PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(pm_sdk PRIVATE ws2_32)

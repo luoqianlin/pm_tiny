@@ -1,4 +1,6 @@
 #include "win_utils.h"
+#include "core/daemon_config.h"
+#include "core/pm_tiny.h"
 
 #include <windows.h>
 
@@ -152,36 +154,11 @@ std::vector<wchar_t> build_environment_block(const std::vector<std::string> &ove
     std::vector<std::wstring> entries;
     std::unordered_map<std::wstring, size_t> key_to_index;
 
-    auto env_strings = GetEnvironmentStringsW();
-    if (env_strings != nullptr) {
-        const wchar_t *current = env_strings;
-        while (*current != L'\0') {
-            std::wstring entry(current);
-            auto key = extract_env_key(entry);
-            if (!key.empty()) {
-                auto key_upper = to_upper_copy(key);
-                key_to_index[key_upper] = entries.size();
-            }
-            entries.emplace_back(entry);
-            current += entry.size() + 1;
-        }
-        FreeEnvironmentStringsW(env_strings);
-    }
-
     for (const auto &override_utf8 : overrides_utf8) {
-        if (override_utf8.empty()) {
-            continue;
-        }
-        std::wstring wide_entry;
-        try {
-            wide_entry = utf8_to_wide(override_utf8);
-        } catch (const std::exception &) {
-            continue;
-        }
+        if (override_utf8.empty()) continue;
+        std::wstring wide_entry = utf8_to_wide(override_utf8);
         auto key = extract_env_key(wide_entry);
-        if (key.empty()) {
-            continue;
-        }
+        if (key.empty()) throw std::runtime_error("invalid environment entry: " + override_utf8);
         auto key_upper = to_upper_copy(key);
         auto iter = key_to_index.find(key_upper);
         if (iter != key_to_index.end()) {
@@ -209,10 +186,8 @@ std::vector<wchar_t> build_environment_block(const std::vector<std::string> &ove
 }
 
 std::string control_pipe_name() {
-    const char *configured = std::getenv("PM_TINY_PIPE_NAME");
-    if (configured != nullptr && configured[0] != '\0') {
-        return configured;
-    }
+    const std::string configured = daemon_environment(PM_TINY_PIPE_NAME);
+    if (!configured.empty()) return configured;
     return "\\\\.\\pipe\\pm_tiny";
 }
 

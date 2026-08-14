@@ -2,7 +2,7 @@
 #include "connection_error.h"
 #include "pm_funcs.h"
 #include "pm_sys.h"
-#include "pm_tiny_helper.h"
+#include "daemon_config.h"
 #include "session.h"
 
 #include <cerrno>
@@ -16,6 +16,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <iostream>
 #include <unistd.h>
 
 volatile sig_atomic_t pm_is_stop = 0;
@@ -23,8 +24,13 @@ volatile sig_atomic_t pm_is_stop = 0;
 namespace {
 
 std::unique_ptr<pm_tiny::session_t> connect_to_daemon() {
-    const auto config = pm_tiny::get_pm_tiny_config();
-    const auto &socket_path = config->pm_tiny_sock_file;
+    const pm_tiny::daemon_cli_options options;
+    const auto resolved = pm_tiny::resolve_daemon_config(options, pm_tiny::daemon_platform::posix);
+    if (!resolved.success) {
+        std::fprintf(stderr, "pm: %s\n", resolved.error.c_str());
+        return nullptr;
+    }
+    const auto &socket_path = resolved.config.socket_file;
     const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         perror("client socket error");
@@ -34,7 +40,7 @@ std::unique_ptr<pm_tiny::session_t> connect_to_daemon() {
     sockaddr_un endpoint{};
     endpoint.sun_family = AF_UNIX;
     socklen_t length = 0;
-    if (config->uds_abstract_namespace) {
+    if (resolved.config.uds_abstract_namespace) {
         if (socket_path.size() >= sizeof(endpoint.sun_path) - 1) {
             std::fprintf(stderr, "pm: abstract socket name is too long\n");
             close(fd);
@@ -57,7 +63,7 @@ std::unique_ptr<pm_tiny::session_t> connect_to_daemon() {
         close(fd);
         pm_tiny::cli::connection_error_info error_info;
         error_info.endpoint = socket_path;
-        error_info.transport = config->uds_abstract_namespace
+        error_info.transport = resolved.config.uds_abstract_namespace
             ? pm_tiny::cli::connection_transport::unix_abstract
             : pm_tiny::cli::connection_transport::unix_filesystem;
         error_info.reason = std::strerror(connect_errno);
@@ -94,7 +100,7 @@ int main(int argc, char *argv[]) {
     if (!parsed.success) {
         std::fprintf(stderr, "pm: %s\n\n%s", parsed.error.c_str(),
                      pm_tiny::cli::command_usage(argc > 0 ? argv[0] : "pm", true).c_str());
-        return EXIT_FAILURE;
+        return 2;
     }
     const auto &command = parsed.command;
     if (command.kind == pm_tiny::cli::command_kind::help) {
@@ -113,7 +119,7 @@ int main(int argc, char *argv[]) {
             auto options = command.list_options;
             options.terminal_width = pm_tiny::cli::stdout_terminal_width();
             options.stdout_is_tty = pm_tiny::cli::stdout_supports_color();
-            display_proc_infos(*session, options);
+            success = display_proc_infos(*session, options);
             break;
         }
         case pm_tiny::cli::command_kind::graph: {
@@ -123,38 +129,77 @@ int main(int argc, char *argv[]) {
             break;
         }
         case pm_tiny::cli::command_kind::start: {
-            progcfg_t config;
-            config.name = command.start.name;
-            config.command = command.start.command;
-            config.kill_timeout_sec = command.start.kill_timeout_sec;
-            config.run_as = command.start.run_as;
-            if (config.run_as.empty()) {
-                if (const auto *password = getpwuid(getuid())) config.run_as = password->pw_name;
+            pm_tiny::start_request request;
+            request.mode = command.start.create ? pm_tiny::start_mode::create : pm_tiny::start_mode::existing;
+            request.name = command.start.name;
+            request.show_log = command.start.show_log;
+            if (command.start.create) {
+                auto &config = request.config;
+                config.name = command.start.name;
+                config.cwd = command.start.cwd;
+                if (config.cwd.empty()) {
+                    char cwd[PATH_MAX];
+                    if (getcwd(cwd, sizeof(cwd)) == nullptr) {
+                        perror("getcwd");
+                        success = false;
+                        break;
+                    }
+                    config.cwd = cwd;
+                }
+                config.executable = command.start.executable;
+                config.args = command.start.args;
+                config.kill_timeout_s = command.start.kill_timeout_sec;
+                config.run_as = command.start.run_as;
+                if (config.run_as.empty()) {
+                    if (const auto *password = getpwuid(getuid())) config.run_as = password->pw_name;
+                }
+                config.env_vars = command.start.env;
+                config.depends_on = command.start.depends_on;
+                config.start_timeout = command.start.start_timeout;
+                config.failure_action = command.start.failure_action;
+                config.daemon = command.start.daemon;
+                config.heartbeat_timeout = command.start.heartbeat_timeout;
+                config.oom_score_adj = command.start.oom_score_adj;
+                config.pty = command.start.pty;
+                config.log_mode = command.start.log_mode_explicit
+                                      ? command.start.log_mode
+                                      : (config.pty ? pm_tiny::log_mode_t::combined : pm_tiny::log_mode_t::split);
+                if (config.pty && config.log_mode == pm_tiny::log_mode_t::split) {
+                    std::cerr << "PTY requires --log-mode combined" << std::endl;
+                    success = false;
+                    break;
+                }
+                config.log_dir = command.start.log_dir;
+                config.log_file_name = command.start.log_file_name;
+                config.log_max_size_kb = command.start.log_max_size_kb;
+                config.log_archive_count = command.start.log_archive_count;
+                config.restart_delay_ms = command.start.restart_delay_ms;
+                config.restart_max_delay_ms = command.start.restart_max_delay_ms;
+                config.restart_window_ms = command.start.restart_window_ms;
+                config.restart_max_attempts = command.start.restart_max_attempts;
+                config.restart_reset_after_ms = command.start.restart_reset_after_ms;
+                for (char **env = ::environ; *env != nullptr; ++env) {
+                    if (std::strncmp(*env, "PM_TINY_", 8) != 0) request.inherited_env.emplace_back(*env);
+                }
             }
-            config.env_vars = command.start.env_vars;
-            config.depends_on = command.start.depends_on;
-            config.start_timeout = command.start.start_timeout;
-            config.failure_action = command.start.failure_action;
-            config.daemon = command.start.daemon ? 1 : 0;
-            config.heartbeat_timeout = command.start.heartbeat_timeout;
-            config.oom_score_adj = command.start.oom_score_adj;
-            config.pty = command.start.pty;
-            start_proc(*session, config, command.start.show_log);
+            success = start_proc(*session, request);
             break;
         }
-        case pm_tiny::cli::command_kind::stop: stop_proc(*session, command.name); break;
+        case pm_tiny::cli::command_kind::stop: success = stop_proc(*session, command.name); break;
         case pm_tiny::cli::command_kind::restart:
-            restart_prog(*session, command.name, command.show_log);
+            success = restart_prog(*session, command.name, command.show_log);
             break;
-        case pm_tiny::cli::command_kind::remove: delete_prog(*session, command.name); break;
-        case pm_tiny::cli::command_kind::save: save_proc(*session); break;
-        case pm_tiny::cli::command_kind::log: show_prog_log(*session, command.name); break;
-        case pm_tiny::cli::command_kind::inspect: inspect_proc(*session, command.name); break;
-        case pm_tiny::cli::command_kind::reload: pm_tiny_reload(*session, 1); break;
+        case pm_tiny::cli::command_kind::remove: success = delete_prog(*session, command.name); break;
+        case pm_tiny::cli::command_kind::save: success = save_proc(*session); break;
+        case pm_tiny::cli::command_kind::log: success = show_prog_log(*session, command.name); break;
+        case pm_tiny::cli::command_kind::inspect: success = inspect_proc(*session, command.name); break;
+        case pm_tiny::cli::command_kind::reload: success = pm_tiny_reload(*session, 1); break;
         case pm_tiny::cli::command_kind::quit: success = pm_tiny_quit(*session); break;
-        case pm_tiny::cli::command_kind::version: show_version(*session); break;
+        case pm_tiny::cli::command_kind::version: success = show_version(*session); break;
+        case pm_tiny::cli::command_kind::info: success = display_daemon_info(*session, command.info_json); break;
         case pm_tiny::cli::command_kind::help: break;
     }
     session->close();
+    if (pm_is_stop) return 130;
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

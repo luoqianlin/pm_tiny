@@ -46,7 +46,7 @@ pm graph --dot > pm_tiny.dot
 
 JSON 输出的 `schema_version` 为 1，包含 `focus`、`nodes` 和 `edges`；边方向仍为依赖到被依赖者。
 DOT 使用 `rankdir=LR`，只生成文本，不要求运行 pm 的设备安装 Graphviz。该功能不增加协议命令，
-支持进程列表 schema v2 的 daemon 均可直接使用。
+支持进程列表 schema v3 的 daemon 均可直接使用。
 
 Android 实机回归可执行 `./scripts/test_android_dependency_graph.sh <adb-serial>`；脚本读取安装目录中的
 `bin/pm2`，并使用独立目录和

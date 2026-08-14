@@ -7,8 +7,8 @@ build:
 	@cmake --install build
 
 install_ubuntu: build
-	@chmod a+x script/ubuntu.sh
-	@./script/ubuntu.sh
+	@chmod a+x scripts/install/install-ubuntu.sh
+	@./scripts/install/install-ubuntu.sh
 	@cp -f build/_install/Release/bin/* /usr/local/bin/
 
 uninstall_ubuntu:

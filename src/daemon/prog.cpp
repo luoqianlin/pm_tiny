@@ -1,11 +1,13 @@
 
 #include "prog.h"
-#include "log.h"
+#include "daemon_log.h"
+#include "signal_util.h"
 #include <assert.h>
 #include "pm_tiny_server.h"
 #include "ANSI_color.h"
 #include "unordered_map"
 #include "android_lmkd.h"
+#include "time_util.h"
 
 
 namespace pm_tiny {
@@ -16,29 +18,10 @@ namespace pm_tiny {
         }
     };
 
-    auto f_log_open(std::string &path, int oflag = O_CREAT | O_RDWR) {
-        const char *file = path.c_str();
-        int fd = open(file, oflag | O_CLOEXEC, S_IRUSR | S_IWUSR);
-        if (fd == -1) {
-            pm_tiny::logger->syscall_errorlog("open");
-        }
-        return fd;
-    };
-
-    auto get_file_size(int fd) {
-        struct stat st;
-        int rc = fstat(fd, &st);
-        if (rc == -1) {
-            logger->syscall_errorlog("fstat");
-        }
-        return st.st_size;
-    };
-
-
     std::ostream &operator<<(std::ostream &os, struct prog_info_t const &prog) {
         os << "name:'" << prog.name + "'" << " pid:" << prog.instance.pid << " ";
         os << "work dir:" << prog.work_dir << " ";
-        os << "args: ";
+        os << "executable: " << prog.executable << " args: ";
         std::for_each(std::begin(prog.args), std::end(prog.args), [&os](const std::string &s) {
             os << s << " ";
         });
@@ -52,9 +35,7 @@ namespace pm_tiny {
     }
 
     void prog_info_t::close_logfds() {
-        std::for_each(std::begin(this->logfile_fd),
-                      std::end(this->logfile_fd),
-                      pm_tiny::f_close);
+        for (auto &writer : log_writers) writer.reset();
     }
 
     void prog_info_t::set_state(int s) {
@@ -86,8 +67,7 @@ namespace pm_tiny {
      * */
     void prog_info_t::close_fds(const CloseableFd& lmkd) {
         for (int i = 0; i < 2; i++) {
-            if (this->rpipefd[i] != -1
-                && this->logfile_fd[i] != -1) {
+            if (this->rpipefd[i] != -1) {
                 read_pipe(i, 1);
             }
         }
@@ -105,46 +85,66 @@ namespace pm_tiny {
     }
 
     void prog_info_t::init_prog_log() {
-        cache_log.resize(0);
+        log_tail.clear();
+        log_health.reset();
         residual_log = "";
-        for (int i = 0; i < 2; i++) {
+        const int writer_count = log_mode == log_mode_t::combined ? 1 : 2;
+        for (int i = 0; i < writer_count; i++) {
             if (this->logfile[i].empty())continue;
-            int oflag = O_CREAT | O_RDWR;
-            this->logfile_fd[i] = f_log_open(this->logfile[i], oflag);
-            lseek64(this->logfile_fd[i], 0, SEEK_END);
-            this->logfile_size[i] = get_file_size(this->logfile_fd[i]);
-            logger->info("log file %s  %ld bytes\n",
-                         this->logfile[i].c_str(), this->logfile_size[i]);
+            log_writers[i].reset(new rotating_log_writer(
+                logfile[i], static_cast<std::size_t>(log_max_size_kb) * 1024U, log_archive_count));
+            std::string error;
+            if (!log_writers[i]->open(error)) {
+                log_health.record_failure(time::gettime_monotonic_ms(), 0, error);
+                PM_TINY_DLOG_ERROR("program %s log degraded: %s", name.c_str(), error.c_str());
+                log_writers[i].reset();
+            }
         }
     }
 
     void prog_info_t::redirect_output_log(int i, std::string text) {
-
-        auto rotate_log_file = [this](int i) {
-            close(this->logfile_fd[i]);
-            pm_tiny::logger_t::logfile_cycle_write(this->logfile[i], this->logfile_count);
-            int oflag = O_CREAT | O_RDWR | O_TRUNC;
-            this->logfile_fd[i] = pm_tiny::f_log_open(this->logfile[i], oflag);
-            this->logfile_size[i] = 0;
-        };
-
-        while (!text.empty()) {
-            int off_out = this->logfile_size[i];
-            if (off_out >= this->logfile_maxsize) {
-//                logger->info("exceeds the maximum file size of %ld bytes,truncate\n",
-//                             this->logfile_maxsize);
-                rotate_log_file(i);
-                off_out = 0;
+        const int writer_index = log_mode == log_mode_t::combined ? 0 : i;
+        const auto now = time::gettime_monotonic_ms();
+        if (!log_writers[writer_index] && (!log_health.degraded || log_health.retry_ready(now))) {
+            log_writers[writer_index].reset(new rotating_log_writer(
+                logfile[writer_index], static_cast<std::size_t>(log_max_size_kb) * 1024U,
+                log_archive_count));
+            std::string open_error;
+            if (!log_writers[writer_index]->open(open_error)) {
+                log_writers[writer_index].reset();
+                log_health.record_failure(now, text.size(), open_error);
+                return;
             }
-            int writeable_size = this->logfile_maxsize - off_out;
-            writeable_size = std::min(writeable_size, (int) text.size());
-            pm_tiny::safe_write(this->logfile_fd[i], text.c_str(), writeable_size);
-            this->logfile_size[i] += writeable_size;
-            if (writeable_size < static_cast<int>(text.size())) {
-                text = text.substr(writeable_size);
-            } else {
-                break;
+            const int writer_count = log_mode == log_mode_t::combined ? 1 : 2;
+            for (int i = 0; i < writer_count; ++i) {
+                if (log_writers[i]) continue;
+                log_writers[i].reset(new rotating_log_writer(
+                    logfile[i], static_cast<std::size_t>(log_max_size_kb) * 1024U,
+                    log_archive_count));
+                std::string sibling_error;
+                if (!log_writers[i]->open(sibling_error)) {
+                    log_writers[i].reset();
+                    log_health.record_failure(now, 0, sibling_error);
+                }
             }
+            bool all_writers_open = true;
+            for (int i = 0; i < writer_count; ++i)
+                all_writers_open = all_writers_open && !!log_writers[i];
+            if (log_health.degraded && all_writers_open) {
+                PM_TINY_DLOG_INFO("program %s log recovered", name.c_str());
+                log_health.record_recovery();
+            }
+        }
+        if (!log_writers[writer_index]) {
+            log_health.dropped_bytes += text.size();
+            return;
+        }
+        std::string error;
+        if (!log_writers[writer_index]->append(text.data(), text.size(), error)) {
+            log_writers[writer_index].reset();
+            const bool changed = !log_health.degraded || log_health.last_error != error;
+            log_health.record_failure(now, text.size(), error);
+            if (changed) PM_TINY_DLOG_ERROR("program %s log degraded: %s", name.c_str(), error.c_str());
         }
     }
 
@@ -165,20 +165,14 @@ namespace pm_tiny {
             ioctl(fd, FIONREAD, &nread);
             if (nread == 0) {
                 close(fd);
-                close(this->logfile_fd[i]);
-                logger->debug("pid:%d pipe fd %d closed\n",
-                              this->instance.last_pid, fd);
+                PM_TINY_DLOG_DEBUG("pid:%d pipe fd %d closed\n",
+                                    this->instance.last_pid, fd);
                 fd = -1;
-                this->logfile_fd[i] = -1;
                 break;
             } else {
                 std::string msg_content;
                 int msg_type = 1;
-                bool s_writeable = killed || this->is_sessions_writeable();
-                if (!s_writeable) {
-                    break;
-                }
-                int remaining_bytes = nread;
+                int remaining_bytes = std::min(nread, 64 * 1024);
                 do {
                     int max_nread;
                     max_nread = std::min(remaining_bytes, (int) sizeof(buffer));
@@ -195,16 +189,18 @@ namespace pm_tiny {
                         redirect_output_log(i, pure_text);
                         if (this->use_pty) {
                             msg_content += output_text;
+                        } else {
+                            msg_content += pure_text;
                         }
                         remaining_bytes -= rc;
                     } else if ((rc == -1 && errno != EINTR)) {
-                        logger->syscall_errorlog("name:%s pid:%d fdin:%d fdout:%d read",
-                                                 this->name.c_str(), this->instance.pid, fd, this->logfile_fd[i]);
+                        PM_TINY_DLOG_ERROR_ERRNO("name:%s pid:%d fdin:%d fdout:%d read",
+                                                 this->name.c_str(), this->instance.pid, fd, -1);
                         break;
                     }
                 } while (remaining_bytes > 0);
 
-                if (this->use_pty) {
+                if (!msg_content.empty()) {
                     this->write_msg_to_sessions(msg_type, msg_content);
                 }
             }
@@ -212,46 +208,22 @@ namespace pm_tiny {
     }
 
     void prog_info_t::write_cache_log_to_session(session_t *session) {
-        if (!this->cache_log.empty()) {
-            std::string prev_log(cache_log.data(), cache_log.size());
+        const std::string prev_log = log_tail.snapshot();
+        if (!prev_log.empty()) {
             auto frames = str_to_frames(1, prev_log);
             for (std::size_t i = 0; i < frames.size(); ++i) {
-                session->write_stream_frame(frames[i], 0, i + 1 < frames.size());
+                session->write_stream_frame(frames[i], 0, true);
             }
         }
     }
 
     void prog_info_t::write_msg_to_sessions(int msg_type, const std::string &msg_content) {
-        int cur_cache_log_size = (int) cache_log.size();
-        int new_msg_len = (int) msg_content.size();
-        int total = cur_cache_log_size + new_msg_len;
-        int remain = MAX_CACHE_LOG_LEN - total;
-        if (remain >= 0) {
-            std::copy(msg_content.begin(), msg_content.end(),
-                      std::back_inserter(cache_log));
-        } else {
-            int move_out = -remain;
-            if (move_out < cur_cache_log_size) {
-                int N = cur_cache_log_size - move_out;
-                for (int i = 0; i < N; i++) {
-                    cache_log[i] = cache_log[i + move_out];
-                }
-                for (int i = N; i < cur_cache_log_size; i++) {
-                    cache_log[i] = msg_content[i - N];
-                }
-                std::copy(msg_content.begin() + move_out, msg_content.end(),
-                          std::back_inserter(cache_log));
-            } else {
-                cache_log.resize(MAX_CACHE_LOG_LEN);
-                std::copy(msg_content.begin() + (move_out - cur_cache_log_size), msg_content.end(),
-                          cache_log.begin());
-            }
-        }
+        log_tail.append(msg_content.data(), msg_content.size());
         if (!this->sessions.empty()) {
             auto frames = str_to_frames(msg_type, msg_content);
             for (std::size_t i = 0; i < frames.size(); ++i) {
                 for (auto &session: sessions) {
-                    session->write_stream_frame(frames[i], 0, i + 1 < frames.size());
+                    session->write_stream_frame(frames[i], 0, msg_type != 0 || i + 1 < frames.size());
                 }
             }
         }
@@ -266,15 +238,6 @@ namespace pm_tiny {
     void prog_info_t::add_session(session_t *session) {
         this->sessions.emplace_back(session);
         session->set_prog(this);
-    }
-
-    bool prog_info_t::is_sessions_writeable() {
-        for (auto &session: this->sessions) {
-            if (session->sbuf_size() > 0) {
-                return false;
-            }
-        }
-        return true;
     }
 
     std::string prog_info_t::log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus) {
@@ -341,7 +304,7 @@ namespace pm_tiny {
         int rc = tree_controller ? tree_controller->signal(instance.tree, signo)
                                  : (instance.pid != -1 ? kill(instance.pid, signo) : 0);
         if (rc != 0) {
-            PM_TINY_LOG_E_SYS("kill");
+            PM_TINY_DLOG_ERROR_ERRNO("kill");
         }
     }
 
@@ -408,22 +371,6 @@ namespace pm_tiny {
             session->set_prog(nullptr);
         }
         this->sessions.clear();
-    }
-
-    bool prog_info_t::is_cfg_equal(const prog_ptr_t prog) const {
-        auto old_args = this->args;
-        auto old_deps = this->depends_on;
-        auto new_args = prog->args;
-        auto new_deps = prog->depends_on;
-
-        std::sort(old_args.begin(), old_args.end());
-        std::sort(new_args.begin(), new_args.end());
-        std::sort(old_deps.begin(), old_deps.end());
-        std::sort(new_deps.begin(), new_deps.end());
-
-        return old_args == new_args
-               && old_deps == new_deps
-               && this->work_dir == prog->work_dir;
     }
 
     bool build_prog_dependency_graph(const std::vector<prog_ptr_t> &progs,

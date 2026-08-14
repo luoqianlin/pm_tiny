@@ -12,7 +12,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
     set(CMAKE_ANDROID_STL_TYPE c++_static CACHE STRING
             "Android C++ runtime linkage" FORCE)
 endif ()
-project(pm_tiny VERSION 2.0.0 LANGUAGES C CXX)
+project(pm_tiny VERSION 3.2.0 LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 
@@ -108,16 +108,54 @@ add_library(pm_tiny_utf8proc STATIC "${UTF8PROC_DIR}/utf8proc.c")
 target_include_directories(pm_tiny_utf8proc PUBLIC "${UTF8PROC_DIR}")
 target_compile_definitions(pm_tiny_utf8proc PUBLIC UTF8PROC_STATIC)
 
-add_library(pm_tiny_cli_output STATIC
+add_library(pm_tiny_protocol STATIC src/core/protocol_v3.cpp)
+target_include_directories(pm_tiny_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+
+add_library(pm_tiny_daemon_config STATIC src/core/daemon_config.cpp)
+target_include_directories(pm_tiny_daemon_config PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+target_link_libraries(pm_tiny_daemon_config PUBLIC yaml-cpp)
+if (PM_TINY_ON_WINDOWS)
+    target_compile_definitions(pm_tiny_daemon_config PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif ()
+
+if (PM_TINY_ON_WINDOWS)
+    set(PM_TINY_ROTATING_LOG_WRITER_SOURCE src/platform/windows/rotating_log_writer.cpp)
+    set(PM_TINY_DAEMON_LOG_PLATFORM_SOURCE)
+else ()
+    set(PM_TINY_ROTATING_LOG_WRITER_SOURCE src/platform/linux/rotating_log_writer.cpp)
+    set(PM_TINY_DAEMON_LOG_PLATFORM_SOURCE src/core/signal_util.cpp)
+endif ()
+add_library(pm_tiny_logging STATIC
+        src/core/program_log.cpp
+        src/core/daemon_log.cpp
+        ${PM_TINY_DAEMON_LOG_PLATFORM_SOURCE}
+        ${PM_TINY_ROTATING_LOG_WRITER_SOURCE})
+target_include_directories(pm_tiny_logging PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+if (PM_TINY_ON_WINDOWS)
+    target_compile_definitions(pm_tiny_logging PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif ()
+
+add_library(pm_tiny_runtime STATIC
+        src/core/daemon_info.cpp
         src/core/process_list.cpp
+        src/core/runtime_snapshot.cpp)
+target_include_directories(pm_tiny_runtime PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+target_link_libraries(pm_tiny_runtime PUBLIC pm_tiny_protocol pm_tiny_daemon_config)
+
+add_library(pm_tiny_cli_output STATIC
+        src/cli/daemon_info_renderer.cpp
         src/cli/process_list_renderer.cpp
+        src/cli/inspect_renderer.cpp
         src/cli/dependency_graph_renderer.cpp)
 target_include_directories(pm_tiny_cli_output PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
         "${NLOHMANN_JSON_DIR}/single_include")
-target_link_libraries(pm_tiny_cli_output PUBLIC pm_tiny_fort pm_tiny_utf8proc pm_tiny_dependency_graph)
+target_link_libraries(pm_tiny_cli_output PUBLIC
+        pm_tiny_fort pm_tiny_utf8proc pm_tiny_dependency_graph pm_tiny_runtime pm_tiny_logging)
 target_compile_definitions(pm_tiny_cli_output PUBLIC JSON_USE_IMPLICIT_CONVERSIONS=0)
 
 add_library(pm_tiny_cli_connection_error STATIC
@@ -131,7 +169,7 @@ target_include_directories(pm_tiny_cli_command PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
-target_link_libraries(pm_tiny_cli_command PUBLIC pm_tiny_cli_output pm_tiny_control_command)
+target_link_libraries(pm_tiny_cli_command PUBLIC pm_tiny_cli_output pm_tiny_control_command pm_tiny_logging)
 
 add_library(pm_tiny_control_command STATIC
         src/core/control_command.cpp)
@@ -146,20 +184,27 @@ target_include_directories(pm_tiny_restart_policy PUBLIC
 add_library(pm_tiny_dependency_graph STATIC src/core/dependency_graph.cpp)
 target_include_directories(pm_tiny_dependency_graph PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 
+add_library(pm_tiny_program_name STATIC src/core/program_name.cpp)
+target_include_directories(pm_tiny_program_name PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+
+add_library(pm_tiny_lifecycle STATIC
+        src/core/control_operation.cpp
+        src/core/termination_job.cpp)
+target_include_directories(pm_tiny_lifecycle PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+
 if (PM_TINY_ON_WINDOWS)
     add_compile_definitions(_WIN32_WINNT=0x0601 WINVER=0x0601)
     add_executable(pm_tiny
-            src/platform/windows/pm_tiny_win.cpp
+            src/platform/windows/pm_tiny.cpp
             src/platform/windows/win_utils.cpp
             src/platform/windows/win_config_loader.cpp
+            src/platform/windows/windows_program_persistence.cpp
             src/platform/windows/process_runner.cpp
-            src/platform/windows/log_writer.cpp
             src/platform/windows/control_server.cpp
             src/platform/windows/asio_named_pipe.cpp
-            src/core/protocol_v2.cpp
             src/core/control_command.cpp
             src/core/restart_policy.cpp
-            src/core/process_list.cpp
+            src/core/persistence_worker.cpp
             src/core/prog_cfg_yaml_helper.cpp
     )
     target_include_directories(pm_tiny
@@ -174,34 +219,33 @@ if (PM_TINY_ON_WINDOWS)
             PM_TINY_WINDOWS_BUILD
             WIN32_LEAN_AND_MEAN
             NOMINMAX)
+    if (PM_TINY_BUILD_TESTS)
+        target_compile_definitions(pm_tiny PRIVATE PM_TINY_TESTING)
+    endif ()
     target_link_libraries(pm_tiny
-            PRIVATE yaml-cpp pm_tiny_asio pm_tiny_dependency_graph ws2_32 advapi32 psapi)
+            PRIVATE yaml-cpp pm_tiny_asio pm_tiny_dependency_graph pm_tiny_program_name pm_tiny_lifecycle
+            pm_tiny_protocol pm_tiny_runtime pm_tiny_logging
+            pm_tiny_daemon_config
+            ws2_32 advapi32 psapi shell32)
 else ()
     add_executable(pm_tiny
             src/daemon/pm_tiny.cpp
             src/daemon/pm_tiny_server.cpp
             src/daemon/child_launch_context.cpp
-            src/daemon/termination_job.cpp
             src/daemon/process_reaper.cpp
             src/daemon/asio_daemon_loop.cpp
             src/daemon/prog.cpp
             src/daemon/prog_cfg.cpp
             src/daemon/procinfo.cpp
-            src/core/logger.hpp
-            src/core/signal_util.cpp
             src/core/session.cpp
             src/core/session.h
-            src/core/protocol_v2.cpp
             src/core/control_command.cpp
             src/core/restart_policy.cpp
-            src/core/process_list.cpp
+            src/core/persistence_worker.cpp
             src/core/pm_sys.cpp
             src/core/pm_sys.h
             src/core/pm_tiny.h
-            src/core/pm_tiny_helper.cpp
             src/core/prog_cfg_yaml_helper.cpp
-            src/core/log.h
-            src/core/log.cpp
             src/core/time_util.cpp
             src/core/string_utils.cpp
             src/core/string_utils.h
@@ -221,6 +265,9 @@ else ()
             PRIVATE PM_TINY_SERVER=1
             PM_TINY_PTY_ENABLE=1
     )
+    if (PM_TINY_BUILD_TESTS)
+        target_compile_definitions(pm_tiny PRIVATE PM_TINY_TESTING)
+    endif()
 
     target_include_directories(pm_tiny
             PRIVATE
@@ -234,7 +281,9 @@ else ()
 
     target_link_libraries(
             pm_tiny
-            PRIVATE yaml-cpp pm_tiny_asio pm_tiny_dependency_graph
+            PRIVATE yaml-cpp pm_tiny_asio pm_tiny_dependency_graph pm_tiny_program_name pm_tiny_lifecycle
+            pm_tiny_protocol pm_tiny_runtime pm_tiny_logging
+            pm_tiny_daemon_config
     )
 
     if (PM_TINY_SANITIZER_ENABLE)
@@ -250,6 +299,7 @@ else ()
     if (PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT_ENABLE)
         message(STATUS "Enable the use of Unix Domain Socket's abstract namespace by default")
         add_compile_definitions(PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT)
+        target_compile_definitions(pm_tiny_daemon_config PRIVATE PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT)
     endif ()
 
     get_target_property(PM_TINY_COMPILE_OPTIONS pm_tiny "COMPILE_OPTIONS")
@@ -260,61 +310,72 @@ endif ()
 
 if (PM_TINY_ON_WINDOWS)
     add_executable(pm
-            src/platform/windows/pm_win_stub.cpp
-            src/platform/windows/win_utils.cpp
-            src/core/protocol_v2.cpp)
+            src/platform/windows/pm.cpp
+            src/platform/windows/win_utils.cpp)
     target_include_directories(pm PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core
             ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows)
     target_compile_definitions(pm PRIVATE PM_TINY_VERSION="${PROJECT_VERSION}" WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(pm PRIVATE pm_tiny_cli_output pm_tiny_cli_command)
+    target_link_libraries(pm PRIVATE pm_tiny_cli_output pm_tiny_cli_command pm_tiny_protocol pm_tiny_runtime
+            pm_tiny_daemon_config)
     target_link_libraries(pm PRIVATE pm_tiny_cli_connection_error)
-    add_executable(pm_sdk_ready_tick_probe test/sdk_ready_tick_probe.cpp)
+    add_executable(pm_sdk_ready_tick_probe tests/fixtures/sdk_ready_tick_probe.cpp)
     target_include_directories(pm_sdk_ready_tick_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
     target_link_libraries(pm_sdk_ready_tick_probe PRIVATE pm_sdk)
 
     if (PM_TINY_BUILD_TESTS)
-        add_executable(windows_process_tree_fixture test/windows_process_tree_fixture.cpp)
+        add_executable(windows_process_tree_fixture tests/fixtures/windows_process_tree_fixture.cpp)
         target_compile_definitions(windows_process_tree_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         if (MINGW)
             set_target_properties(windows_process_tree_fixture PROPERTIES LINK_FLAGS "-municode")
         endif ()
         add_executable(windows_protocol_probe
-                test/windows_protocol_probe.cpp
-                src/core/protocol_v2.cpp)
+                tests/fixtures/windows_protocol_probe.cpp)
         target_include_directories(windows_protocol_probe PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
         target_compile_definitions(windows_protocol_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-        add_executable(connection_error_test test/connection_error_test.cpp)
+        target_link_libraries(windows_protocol_probe PRIVATE pm_tiny_protocol)
+        add_executable(connection_error_test tests/unit/connection_error_test.cpp)
         target_link_libraries(connection_error_test PRIVATE pm_tiny_cli_connection_error)
-        add_executable(dependency_graph_renderer_test test/dependency_graph_renderer_test.cpp)
+        add_executable(dependency_graph_renderer_test tests/unit/dependency_graph_renderer_test.cpp)
         target_link_libraries(dependency_graph_renderer_test PRIVATE pm_tiny_cli_output)
-        add_executable(cli_command_test test/cli_command_test.cpp)
+        add_executable(cli_command_test tests/unit/cli_command_test.cpp)
         target_link_libraries(cli_command_test PRIVATE pm_tiny_cli_command)
-        add_executable(prog_cfg_order_test test/prog_cfg_order_test.cpp)
-        target_link_libraries(prog_cfg_order_test PRIVATE pm_tiny_dependency_graph)
+        add_executable(prog_cfg_order_test tests/unit/prog_cfg_order_test.cpp)
+        target_link_libraries(prog_cfg_order_test PRIVATE pm_tiny_dependency_graph pm_tiny_program_name)
         target_include_directories(prog_cfg_order_test PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
-        add_executable(control_command_test test/control_command_test.cpp)
+        add_executable(control_command_test tests/unit/control_command_test.cpp)
         target_link_libraries(control_command_test PRIVATE pm_tiny_control_command)
-        add_executable(restart_policy_test test/restart_policy_test.cpp)
+        add_executable(restart_policy_test tests/unit/restart_policy_test.cpp)
         target_link_libraries(restart_policy_test PRIVATE pm_tiny_restart_policy)
-        add_executable(dependency_graph_test test/dependency_graph_test.cpp)
+        add_executable(dependency_graph_test tests/unit/dependency_graph_test.cpp)
         target_link_libraries(dependency_graph_test PRIVATE pm_tiny_dependency_graph)
+        add_executable(termination_job_test tests/unit/termination_job_test.cpp)
+        target_link_libraries(termination_job_test PRIVATE pm_tiny_lifecycle)
+        add_executable(control_operation_test tests/unit/control_operation_test.cpp)
+        target_link_libraries(control_operation_test PRIVATE pm_tiny_lifecycle)
+        add_executable(runtime_snapshot_test tests/unit/runtime_snapshot_test.cpp)
+        target_link_libraries(runtime_snapshot_test PRIVATE pm_tiny_cli_output)
+        add_executable(daemon_config_test tests/unit/daemon_config_test.cpp)
+        target_link_libraries(daemon_config_test PRIVATE pm_tiny_daemon_config)
+        add_executable(program_log_test tests/unit/program_log_test.cpp)
+        target_link_libraries(program_log_test PRIVATE pm_tiny_logging)
+        add_executable(daemon_log_test tests/unit/daemon_log_test.cpp)
+        target_link_libraries(daemon_log_test PRIVATE pm_tiny_logging)
+        add_executable(daemon_info_test tests/unit/daemon_info_test.cpp)
+        target_link_libraries(daemon_info_test PRIVATE pm_tiny_cli_output)
     endif ()
 else ()
     add_executable(pm
             src/cli/pm.cpp
             src/cli/pm_funcs.cpp
             src/core/session.cpp
-            src/core/protocol_v2.cpp
             src/core/pm_sys.cpp
-            src/core/pm_tiny_helper.cpp
             src/core/frame_stream.hpp
             src/core/time_util.cpp
-            src/core/log.cpp
             src/core/memory_util.cpp
             src/core/memory_util.h
             src/core/globals.cpp
@@ -329,6 +390,7 @@ else ()
     target_link_libraries(
             pm
             PRIVATE yaml-cpp pm_tiny_asio pm_tiny_cli_output pm_tiny_cli_connection_error pm_tiny_cli_command
+            pm_tiny_protocol pm_tiny_runtime pm_tiny_daemon_config pm_tiny_logging
     )
     if (PM_TINY_SANITIZER_ENABLE)
         target_compile_options(pm PRIVATE -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
@@ -363,9 +425,16 @@ if (PM_TINY_BUILD_TESTS)
         add_test(NAME control_command_test COMMAND control_command_test)
         add_test(NAME restart_policy_test COMMAND restart_policy_test)
         add_test(NAME dependency_graph_test COMMAND dependency_graph_test)
+        add_test(NAME termination_job_test COMMAND termination_job_test)
+        add_test(NAME control_operation_test COMMAND control_operation_test)
+        add_test(NAME runtime_snapshot_test COMMAND runtime_snapshot_test)
+        add_test(NAME daemon_config_test COMMAND daemon_config_test)
+        add_test(NAME program_log_test COMMAND program_log_test)
+        add_test(NAME daemon_log_test COMMAND daemon_log_test)
+        add_test(NAME daemon_info_test COMMAND daemon_info_test)
         add_test(NAME windows_protocol_integration
                 COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-                -File ${CMAKE_CURRENT_SOURCE_DIR}/test/windows_protocol_integration.ps1
+                -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/windows/windows_protocol_integration.ps1
                 -Daemon $<TARGET_FILE:pm_tiny>
                 -Cli $<TARGET_FILE:pm>
                 -SdkProbe $<TARGET_FILE:pm_sdk_ready_tick_probe>
@@ -377,7 +446,7 @@ if (PM_TINY_BUILD_TESTS)
         if (MSVC)
             add_test(NAME windows_service_integration
                     COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-                    -File ${CMAKE_CURRENT_SOURCE_DIR}/test/windows_service_integration.ps1
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/windows/windows_service_integration.ps1
                     -Daemon $<TARGET_FILE:pm_tiny>
                     -Client $<TARGET_FILE:pm>
                     -TreeFixture $<TARGET_FILE:windows_process_tree_fixture>
@@ -387,7 +456,7 @@ if (PM_TINY_BUILD_TESTS)
         endif ()
     else ()
         enable_testing()
-        add_subdirectory(test)
+        add_subdirectory(tests)
     endif ()
 endif ()
 

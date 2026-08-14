@@ -1,0 +1,16 @@
+pm_tiny_home_dir: /usr/local/pm_tiny
+pm_tiny_sock_file: /run/pm_tinyd.sock
+pm_tiny_log_file: /var/log/pm_tiny/pm_tiny.log
+pm_tiny_log_level: info
+pm_tiny_log_max_size_kb: 4096
+pm_tiny_log_archive_count: 3
+pm_tiny_prog_cfg_file: /usr/local/pm_tiny/prog.yaml
+pm_tiny_app_log_dir: /var/log/pm_tiny/logs
+# daemon 日志配置可由同名环境变量或长选项覆盖。
+pm_tiny_app_environ_dir: /usr/local/pm_tiny/environ
+pm_tiny_uds_abstract_namespace: false
+# daemon 自身 UID 始终允许；按需追加其他 CLI 或应用 SDK 身份。
+pm_tiny_allowed_uids: []
+pm_tiny_allowed_gids: []
+pm_tiny_process_tree_mode: auto
+# pm_tiny_cgroup_root: /sys/fs/cgroup

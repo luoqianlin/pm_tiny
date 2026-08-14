@@ -1,0 +1,7 @@
+- name: sdk_probe
+  executable: '__SDK_PROBE__'
+  cwd: '__WORK_DIR__'
+  daemon: false
+  start_timeout: 2
+  heartbeat_timeout: 1
+  log_dir: '__LOG_DIR__'
