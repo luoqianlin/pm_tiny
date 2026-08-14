@@ -279,7 +279,7 @@ int run_interrupt_cli(const std::string &cli_utf8, const std::string &name_utf8)
         CloseHandle(process.hProcess);
         return 8;
     }
-    const DWORD wait = WaitForSingleObject(process.hProcess, 5000);
+    const DWORD wait = WaitForSingleObject(process.hProcess, 15000);
     DWORD exit_code = 0;
     if (wait != WAIT_OBJECT_0 || !GetExitCodeProcess(process.hProcess, &exit_code)) {
         TerminateProcess(process.hProcess, 1);
