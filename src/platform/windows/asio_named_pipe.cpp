@@ -13,7 +13,10 @@
 
 namespace pm_tiny { namespace win {
 
-namespace { constexpr std::size_t session_queue_limit = 1024U * 1024U; }
+namespace {
+// Keep a stalled named-pipe client from retaining an unbounded log backlog.
+constexpr std::size_t session_queue_limit = 64U * 1024U;
+}
 
 namespace {
 
