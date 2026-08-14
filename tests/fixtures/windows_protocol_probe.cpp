@@ -68,9 +68,9 @@ bool wait_for_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
     return false;
 }
 
-bool drain_until_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
+bool drain_slowly_until_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    std::vector<std::uint8_t> buffer(64 * 1024);
+    std::vector<std::uint8_t> buffer(4 * 1024);
     while (std::chrono::steady_clock::now() < deadline) {
         DWORD available = 0;
         if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
@@ -78,7 +78,7 @@ bool drain_until_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
             return error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED || error == ERROR_NO_DATA;
         }
         if (available == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
         DWORD read = 0;
@@ -87,6 +87,7 @@ bool drain_until_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
             const DWORD error = GetLastError();
             return error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED || error == ERROR_NO_DATA;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return false;
 }
@@ -220,8 +221,8 @@ int run_slow_log(const std::string &name) {
         CloseHandle(pipe);
         return 3;
     }
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    const bool disconnected = drain_until_disconnect(pipe, std::chrono::seconds(10));
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    const bool disconnected = drain_slowly_until_disconnect(pipe, std::chrono::seconds(20));
     CloseHandle(pipe);
     return disconnected ? 0 : 4;
 }
