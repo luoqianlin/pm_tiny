@@ -68,30 +68,6 @@ bool wait_for_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
     return false;
 }
 
-bool drain_slowly_until_disconnect(HANDLE pipe, std::chrono::milliseconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    std::vector<std::uint8_t> buffer(4 * 1024);
-    while (std::chrono::steady_clock::now() < deadline) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
-            const DWORD error = GetLastError();
-            return error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED || error == ERROR_NO_DATA;
-        }
-        if (available == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
-        DWORD read = 0;
-        if (!ReadFile(pipe, buffer.data(), std::min<DWORD>(available, static_cast<DWORD>(buffer.size())),
-                      &read, nullptr)) {
-            const DWORD error = GetLastError();
-            return error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED || error == ERROR_NO_DATA;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    return false;
-}
-
 bool read_response(HANDLE pipe, pm_tiny::protocol_message &response) {
     pm_tiny::protocol_decoder decoder;
     std::vector<std::uint8_t> buffer(4096);
@@ -222,9 +198,23 @@ int run_slow_log(const std::string &name) {
         return 3;
     }
     std::this_thread::sleep_for(std::chrono::seconds(10));
-    const bool disconnected = drain_slowly_until_disconnect(pipe, std::chrono::seconds(20));
+    // Keep this client stalled while a second client checks that the daemon
+    // remains responsive.  Pipe buffers may retain unread bytes after the
+    // server closes a session, so observing disconnect directly is unreliable.
+    HANDLE probe = connect_pipe();
+    if (probe == INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe);
+        return 4;
+    }
+    const auto version = version_request();
+    pm_tiny::protocol_message response;
+    std::int32_t status = -1;
+    std::string message;
+    const bool healthy = write_all(probe, version.data(), version.size()) &&
+        read_response(probe, response) && response_status(response, status, message) && status == 0;
+    CloseHandle(probe);
     CloseHandle(pipe);
-    return disconnected ? 0 : 4;
+    return healthy ? 0 : 5;
 }
 
 std::wstring quote_argument(const std::wstring &value) {
