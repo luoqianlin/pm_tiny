@@ -680,13 +680,23 @@ function Run-HighProcessCountScenario {
     Start-TestDaemon "high-process-count" $config
     $script:DaemonProcess.Refresh()
     $baselineThreads = $script:DaemonProcess.Threads.Count
+    & $ProtocolProbe "connection-churn" "200"
+    if ($LASTEXITCODE -ne 0) { throw "short connection warm-up failed" }
+    Start-Sleep -Milliseconds 250
+    $script:DaemonProcess.Refresh()
     $baselineHandles = $script:DaemonProcess.HandleCount
+    $baselinePrivateBytes = $script:DaemonProcess.PrivateMemorySize64
     & $ProtocolProbe "connection-churn" "1000"
     if ($LASTEXITCODE -ne 0) { throw "short connection churn failed" }
-    Start-Sleep -Milliseconds 250
+    Start-Sleep -Milliseconds 500
     $script:DaemonProcess.Refresh()
     if ($script:DaemonProcess.HandleCount -gt $baselineHandles + 8) {
         throw "daemon handles grew with short connections: baseline=$baselineHandles current=$($script:DaemonProcess.HandleCount)"
+    }
+    $privateGrowthLimit = 3 * 1024 * 1024
+    $privateGrowth = $script:DaemonProcess.PrivateMemorySize64 - $baselinePrivateBytes
+    if ($privateGrowth -gt $privateGrowthLimit) {
+        throw "daemon private bytes grew with short connections: baseline=$baselinePrivateBytes current=$($script:DaemonProcess.PrivateMemorySize64) delta=$privateGrowth"
     }
     for ($index = 0; $index -lt 100; $index++) {
         $name = "load_$index"

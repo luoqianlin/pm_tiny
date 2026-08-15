@@ -8,6 +8,8 @@
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -160,6 +162,7 @@ bool file_exists(const std::string &path) {
 }
 
 bool load_yaml_file(const std::string &path, YAML::Node &root, std::string &error) {
+    constexpr std::uintmax_t max_yaml_bytes = 4U * 1024U * 1024U;
 #ifdef _WIN32
     HANDLE file = INVALID_HANDLE_VALUE;
     try { file = CreateFileW(utf8_to_wide(path).c_str(), GENERIC_READ, FILE_SHARE_READ,
@@ -173,8 +176,9 @@ bool load_yaml_file(const std::string &path, YAML::Node &root, std::string &erro
         return false;
     }
     LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 16LL * 1024 * 1024) {
-        error = "Cannot read daemon config size `" + path + "`";
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+        static_cast<std::uintmax_t>(size.QuadPart) > max_yaml_bytes) {
+        error = "Daemon config `" + path + "` exceeds 4 MiB limit";
         CloseHandle(file);
         return false;
     }
@@ -200,7 +204,24 @@ bool load_yaml_file(const std::string &path, YAML::Node &root, std::string &erro
     }
     return true;
 #else
-    try { root = YAML::LoadFile(path); }
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        error = "Cannot open daemon config `" + path + "`: " + std::strerror(errno);
+        return false;
+    }
+    const auto size = input.tellg();
+    if (size < 0 || static_cast<std::uintmax_t>(size) > max_yaml_bytes) {
+        error = "Daemon config `" + path + "` exceeds 4 MiB limit";
+        return false;
+    }
+    input.seekg(0, std::ios::beg);
+    std::string content(static_cast<std::size_t>(size), '\0');
+    if (!content.empty()) input.read(&content[0], static_cast<std::streamsize>(content.size()));
+    if (!input && !input.eof()) {
+        error = "Cannot read daemon config `" + path + "`";
+        return false;
+    }
+    try { root = YAML::Load(content); }
     catch (const YAML::Exception &ex) {
         error = "Failed to load daemon config `" + path + "`: " + ex.what();
         return false;

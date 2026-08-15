@@ -8,7 +8,7 @@ PM_Tiny 按运行时代码、平台实现、测试职责和部署资产分离目
 | `src/daemon` | Linux/Android daemon 与进程监督实现 |
 | `src/cli` | Linux/Android CLI 及公共输出逻辑 |
 | `src/platform` | Linux、Android、Windows 平台实现 |
-| `sdk` | 应用 ready/tick 客户端 SDK |
+| `sdk` | SDK 4.0 公共 C++/C 接口、共享状态机及 POSIX/Windows transport |
 | `tests/unit` | 可由 CTest 独立执行的单元及组件测试 |
 | `tests/integration/linux` | Linux CLI、协议、依赖和进程树集成测试 |
 | `tests/integration/windows` | Windows named pipe、进程树和 SCM 集成测试 |

@@ -39,7 +39,7 @@ cmake --build build-release -j4
 
 ## 2.0.0 Linux 历史基线
 
-本节由 2.0.0 Release 构建在一台参考开发机上实测，具体环境与精确数值见 [`benchmark-linux-x86_64.json`](benchmarks/benchmark-linux-x86_64.json)。这些数字是历史基线，不代表 3.2.0 的当前实测结果，也不构成所有设备上的性能保证。
+本节由 2.0.0 Release 构建在一台参考开发机上实测，具体环境与精确数值见 [`benchmark-linux-x86_64.json`](benchmarks/benchmark-linux-x86_64.json)。这些数字是历史基线，不代表 4.0.0 的当前实测结果，也不构成所有设备上的性能保证。
 
 参考环境：Ubuntu x86_64、Linux 6.8.0、Intel Core i7-9700、8 个逻辑 CPU、GCC 13.3、Release 构建。
 

@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 23-6-21.
+//
 #include "prog_cfg.h"
 #include "daemon_log.h"
 #include "string_utils.h"
@@ -174,6 +177,11 @@ void apply_test_save_delay() {}
 }
 
 namespace pm_tiny {
+
+namespace {
+constexpr std::size_t max_program_config_bytes = 4U * 1024U * 1024U;
+constexpr std::size_t max_program_count = 4096;
+}
     bool recover_prog_cfg_save(const std::string &cfg_path,
                                const std::string &app_environ_dir,
                                std::string &error) {
@@ -426,6 +434,11 @@ namespace pm_tiny {
             return result;
         }
         const auto content = content_stream.str();
+        if (content.size() > max_program_config_bytes) {
+            result.error = "cfg file " + cfg_path + " exceeds 4 MiB limit";
+            PM_TINY_DLOG_ERROR("%s", result.error.c_str());
+            return result;
+        }
         if (is_effectively_empty_prog_cfg_yaml(content)) {
             result.success = true;
             return result;
@@ -445,6 +458,10 @@ namespace pm_tiny {
         if (!document.success) {
             PM_TINY_DLOG_ERROR("cfg file %s invalid: %s", cfg_path.c_str(), document.error.c_str());
             result.error = "cfg file " + cfg_path + " invalid: " + document.error;
+            return result;
+        }
+        if (document.programs.size() > max_program_count) {
+            result.error = "cfg file " + cfg_path + " contains more than 4096 programs";
             return result;
         }
         std::string order_error;

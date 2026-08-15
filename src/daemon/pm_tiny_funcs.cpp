@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 23-7-27.
+//
 #include "pm_tiny_funcs.h"
 #include "pm_tiny_server.h"
 #include "prog.h"
@@ -9,6 +12,10 @@
 #include "control_command.h"
 #include "prog_cfg_order.h"
 #include "daemon_info.h"
+#include "launch_environment.h"
+#include <cerrno>
+#include <cstring>
+#include <unistd.h>
 
 std::string msg_cmd_not_completed(const std::string &name) {
     std::string msg = "On target `";
@@ -29,6 +36,27 @@ std::string msg_server_stoping() {
 }
 
 namespace {
+
+bool heartbeat_peer_matches(pm_tiny::pm_tiny_server_t &server,
+                            const pm_tiny::session_ptr_t &session,
+                            const pm_tiny::prog_ptr_t &prog,
+                            const char *operation) {
+    const pid_t peer_pid = session && session->has_peer_credentials() ? session->peer_pid() : -1;
+    const bool matches = prog && prog->instance.pid > 0 && prog->instance.tree.active &&
+                         server.process_tree && peer_pid > 0 &&
+                         server.process_tree->contains(prog->instance.tree, peer_pid);
+    if (!matches) {
+        PM_TINY_DLOG_ERROR("reject `%s` %s from pid=%d uid=%u gid=%u: peer is not in current process tree",
+                           prog ? prog->name.c_str() : "<unknown>", operation,
+                           static_cast<int>(peer_pid),
+                           session && session->has_peer_credentials()
+                               ? static_cast<unsigned>(session->peer_uid()) : 0U,
+                           session && session->has_peer_credentials()
+                               ? static_cast<unsigned>(session->peer_gid()) : 0U);
+        if (session) session->close();
+    }
+    return matches;
+}
 
 pm_tiny::prog_cfg_t snapshot_config(const pm_tiny::prog_info_t &prog) {
     pm_tiny::prog_cfg_t config;
@@ -212,12 +240,84 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
     std::unique_ptr<pm_tiny::prog_info_t> created;
     if (request.mode == pm_tiny::start_mode::existing) {
         if (!target) { fail(-2, "process not found: `" + request.name + "`"); return wf; }
+        pm_tiny::passwd_t target_user;
+        const bool target_resolved = target->run_as.empty()
+            ? pm_tiny::get_user_from_uid(geteuid(), target_user) == 0
+            : pm_tiny::get_uid_from_username(target->run_as.c_str(), target_user) == 0;
+        PM_TINY_DLOG_INFO("start request peer_pid=%d peer_uid=%u peer_gid=%u name=%s "
+                           "target_user=%s target_uid=%lld target_gid=%lld executable=%s identity=config",
+                           session && session->has_peer_credentials() ? static_cast<int>(session->peer_pid()) : -1,
+                           session && session->has_peer_credentials() ? static_cast<unsigned>(session->peer_uid()) : 0U,
+                           session && session->has_peer_credentials() ? static_cast<unsigned>(session->peer_gid()) : 0U,
+                           request.name.c_str(),
+                           target->run_as.empty() ? "<daemon>" : target->run_as.c_str(),
+                           target_resolved ? static_cast<long long>(target_user.pw_uid) : -1LL,
+                           target_resolved ? static_cast<long long>(target_user.pw_gid) : -1LL,
+                           target->executable.c_str());
     } else {
         if (target) { fail(-2, "process already exists: `" + request.name + "`"); return wf; }
         auto cfg = request.config;
         if (cfg.name != request.name || cfg.executable.empty() || cfg.cwd.empty()) {
             fail(-3, "invalid runtime definition"); return wf;
         }
+        if (!session || !session->has_peer_credentials()) {
+            fail(-3, "cannot determine start request peer identity");
+            return wf;
+        }
+        pm_tiny::passwd_t peer_user;
+        if (pm_tiny::get_user_from_uid(session->peer_uid(), peer_user) == -1) {
+            const int error = errno;
+            fail(-3, "cannot resolve peer uid " + std::to_string(session->peer_uid()) +
+                     ": " + std::strerror(error));
+            return wf;
+        }
+        const bool explicit_user = !cfg.run_as.empty();
+        pm_tiny::passwd_t target_user;
+        if (explicit_user) {
+            if (pm_tiny::get_uid_from_username(cfg.run_as.c_str(), target_user) == -1) {
+                const int error = errno;
+                fail(-3, "cannot resolve target user `" + cfg.run_as + "`: " + std::strerror(error));
+                return wf;
+            }
+        } else {
+            target_user = peer_user;
+            cfg.run_as = peer_user.pw_name;
+        }
+        const bool cross_user = target_user.pw_uid != peer_user.pw_uid ||
+                                target_user.pw_gid != peer_user.pw_gid;
+        if (geteuid() != 0 &&
+            (target_user.pw_uid != geteuid() || target_user.pw_gid != getegid())) {
+            PM_TINY_DLOG_ERROR("reject start peer_pid=%d peer_uid=%u name=%s target_user=%s "
+                                "target_uid=%u: daemon uid=%u cannot switch identity",
+                                static_cast<int>(session->peer_pid()),
+                                static_cast<unsigned>(session->peer_uid()), request.name.c_str(),
+                                cfg.run_as.c_str(), static_cast<unsigned>(target_user.pw_uid),
+                                static_cast<unsigned>(geteuid()));
+            fail(-3, "pm_tiny uid " + std::to_string(geteuid()) + " cannot start `" +
+                     request.name + "` as user `" + cfg.run_as + "`");
+            return wf;
+        }
+        if (cross_user && !pm_tiny::executable_has_path(cfg.executable)) {
+            PM_TINY_DLOG_ERROR("reject cross-user start peer_pid=%d peer_uid=%u name=%s "
+                                "target_user=%s executable=%s: executable has no path",
+                                static_cast<int>(session->peer_pid()),
+                                static_cast<unsigned>(session->peer_uid()), request.name.c_str(),
+                                cfg.run_as.c_str(), cfg.executable.c_str());
+            fail(-3, "cross-user start requires executable containing `/`: `" + cfg.executable + "`");
+            return wf;
+        }
+        if (cross_user) {
+            request.inherited_env = pm_tiny::compose_launch_environment(
+                request.inherited_env, {}, &target_user, true);
+        }
+        PM_TINY_DLOG_INFO("start request peer_pid=%d peer_uid=%u peer_gid=%u name=%s "
+                           "target_user=%s target_uid=%u target_gid=%u executable=%s identity=%s",
+                           static_cast<int>(session->peer_pid()),
+                           static_cast<unsigned>(session->peer_uid()),
+                           static_cast<unsigned>(session->peer_gid()), request.name.c_str(),
+                           cfg.run_as.c_str(), static_cast<unsigned>(target_user.pw_uid),
+                           static_cast<unsigned>(target_user.pw_gid), cfg.executable.c_str(),
+                           explicit_user ? "explicit" : "peer-default");
         created = pm_tiny_server.create_prog(cfg, request.inherited_env);
         if (!created) { fail(-3, "cannot create `" + request.name + "`"); return wf; }
         target = created.get();
@@ -247,7 +347,10 @@ std::unique_ptr<pm_tiny::frame_t> handle_cmd_start(pm_tiny::pm_tiny_server_t &pm
             fail(-3, dependency_error); return wf;
         }
         if (pm_tiny_server.start_and_add_prog(target) != 0) {
-            fail(-3, "cannot add `" + request.name + "`"); return wf;
+            const int error = errno == 0 ? EIO : errno;
+            fail(-3, "cannot start `" + request.name + "` as user `" + cfg.run_as +
+                     "`: " + std::strerror(error));
+            return wf;
         }
         created.release();
     }
@@ -587,9 +690,10 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
             PM_TINY_DLOG_ERROR("not found app: `%s`", name.c_str());
             session->close();
         } else {
-            PM_TINY_DLOG_DEBUG("app `%s` ready", name.c_str());
             auto prog = *iter;
-            if (prog->instance.pid != -1 && prog->state == PM_TINY_PROG_STATE_STARTING) {
+            if (!heartbeat_peer_matches(pm_tiny_server, session, prog, "ready")) return;
+            PM_TINY_DLOG_DEBUG("app `%s` ready", name.c_str());
+            if (prog->state == PM_TINY_PROG_STATE_STARTING) {
                 prog->state = PM_TINY_PROG_STATE_RUNING;
                 prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
                 proglist_t pl;
@@ -608,9 +712,10 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
             PM_TINY_DLOG_ERROR("not found app: `%s`", name.c_str());
             session->close();
         } else {
-            PM_TINY_DLOG_DEBUG("recv `%s` tick", name.c_str());
             auto prog = *iter;
-            if (prog->instance.pid != -1 && prog->state == PM_TINY_PROG_STATE_RUNING) {
+            if (!heartbeat_peer_matches(pm_tiny_server, session, prog, "tick")) return;
+            PM_TINY_DLOG_DEBUG("recv `%s` tick", name.c_str());
+            if (prog->state == PM_TINY_PROG_STATE_RUNING) {
                 prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
             }
         }

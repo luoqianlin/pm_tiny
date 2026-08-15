@@ -19,6 +19,9 @@ cleanup() {
         fi
     fi
     kill "${DAEMON_PID:-0}" 2>/dev/null || true
+    if [[ ${INNOCENT_PID:-0} -gt 0 ]]; then
+        kill "$INNOCENT_PID" 2>/dev/null || true
+    fi
     if [[ $status -ne 0 ]]; then
         [[ ! -f "$TMP/daemon.out" ]] || { echo "--- daemon.out ---" >&2; tail -200 "$TMP/daemon.out" >&2; }
         if [[ -f "$TMP/restart.out" ]]; then
@@ -56,6 +59,66 @@ DAEMON_PID=$!
 for _ in $(seq 1 50); do [[ -S "$TMP/pm.sock" ]] && break; sleep .05; done
 [[ -S "$TMP/pm.sock" ]]
 
+signal_mask_before=$(awk '/^SigBlk:/ {print $2}' "/proc/$DAEMON_PID/status")
+set +e
+"$BIN/pm" start missing_executable --no-daemon -- "$TMP/does-not-exist" > "$TMP/missing-exec.out" 2>&1
+missing_exec_status=$?
+set -e
+[[ $missing_exec_status -ne 0 ]]
+signal_mask_after=$(awk '/^SigBlk:/ {print $2}' "/proc/$DAEMON_PID/status")
+[[ "$signal_mask_after" == "$signal_mask_before" ]]
+
+if id nobody >/dev/null 2>&1 && [[ $(id -u nobody) != "$(id -u)" ]]; then
+    set +e
+    "$BIN/pm" start forbidden_identity --user nobody -- /bin/true \
+        >"$TMP/forbidden-identity.out" 2>&1
+    forbidden_identity_status=$?
+    set -e
+    [[ $forbidden_identity_status -eq 1 ]]
+    grep -q "pm_tiny uid $(id -u) cannot start.*as user.*nobody" "$TMP/forbidden-identity.out"
+fi
+
+/usr/bin/sleep 30 &
+INNOCENT_PID=$!
+"$BIN/pm" start ownership_probe --no-daemon --no-pty -- /usr/bin/sleep 30 >/dev/null
+kill -0 "$INNOCENT_PID"
+"$BIN/pm" delete ownership_probe >/dev/null
+kill -0 "$INNOCENT_PID"
+kill "$INNOCENT_PID"
+wait "$INNOCENT_PID" 2>/dev/null || true
+INNOCENT_PID=0
+
+python3 - "$TMP/pm.sock" <<'PY'
+import socket
+import struct
+import sys
+
+HEADER = struct.Struct(">4sBBHII")
+
+def request(request_id):
+    return HEADER.pack(b"PMT3", 3, 0, 0x29, request_id, 0)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise SystemExit("connection closed before both sticky frames were returned")
+        data.extend(chunk)
+    return bytes(data)
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(2)
+client.connect(sys.argv[1])
+client.sendall(request(101) + request(102))
+for expected_id in (101, 102):
+    magic, version, flags, msg_type, request_id, size = HEADER.unpack(read_exact(client, HEADER.size))
+    assert magic == b"PMT3" and version == 3
+    assert flags & 1 and msg_type == 0x29 and request_id == expected_id
+    read_exact(client, size)
+client.close()
+PY
+
 baseline_fds=$(find "/proc/$DAEMON_PID/fd" -mindepth 1 -maxdepth 1 | wc -l)
 run_connection_churn() {
 python3 - "$TMP/pm.sock" <<'PY'
@@ -82,7 +145,9 @@ warmed_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$DAEMON_PID/status")
 run_connection_churn
 wait_for_fd_recovery
 current_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$DAEMON_PID/status")
-(( current_rss <= warmed_rss + 4096 ))
+if [[ "${PM_TINY_TEST_SANITIZED:-0}" != 1 ]]; then
+    (( current_rss <= warmed_rss + 4096 ))
+fi
 
 if command -v sudo >/dev/null && sudo -n true >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
     chmod 711 "$TMP"
@@ -105,7 +170,7 @@ PY
     grep -q 'reject control connection.*uid=' "$TMP/pm.log"
 fi
 
-"$BIN/pm" --version | grep -q 'pm_tiny: 3.2.0'
+"$BIN/pm" --version | grep -q 'pm_tiny: 4.0.0'
 "$BIN/pm" ls | grep -q 'Total: 0'
 "$BIN/pm" ls --json | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data == {"schema_version": 5, "total": 0, "processes": []}'
 "$BIN/pm" save > "$TMP/save.out" &
@@ -196,6 +261,15 @@ grep -q integration "$TMP/log.out"
 grep -q 'PM_TINY MESSAGE' "$TMP/log.out"
 "$BIN/pm" delete logapp >/dev/null
 
+"$BIN/pm" start log_delete --no-daemon --kill-timeout 1 -- /usr/bin/sleep 30 >/dev/null
+timeout --kill-after=1s 5s "$BIN/pm" log log_delete > "$TMP/log-delete.out" &
+LOG_DELETE_PID=$!
+sleep .2
+"$BIN/pm" delete log_delete >/dev/null
+wait "$LOG_DELETE_PID"
+grep -q 'PM_TINY MESSAGE' "$TMP/log-delete.out"
+wait_for_fd_recovery
+
 "$BIN/pm" start combined_log --no-daemon --log-mode combined -- /usr/bin/printf combined-marker >/dev/null
 for _ in $(seq 1 20); do [[ -f "$TMP/logs/combined_log.log" ]] && break; sleep .05; done
 grep -q combined-marker "$TMP/logs/combined_log.log"
@@ -267,6 +341,28 @@ sleep 2
 "$BIN/pm" ls | grep sdkapp | grep -q online
 grep -q 'app `sdkapp` ready' "$TMP/pm.log"
 grep -q 'recv `sdkapp` tick' "$TMP/pm.log"
+python3 - "$TMP/pm.sock" <<'PY'
+import socket
+import struct
+import sys
+
+name = b"sdkapp"
+payload = struct.pack(">I", len(name)) + name
+frame = struct.pack(">4sBBHII", b"PMT3", 3, 0, 0x32, 7001, len(payload)) + payload
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(sys.argv[1])
+client.sendall(frame)
+try:
+    client.recv(1)
+except ConnectionResetError:
+    pass
+client.close()
+PY
+for _ in $(seq 1 20); do
+    grep -q 'reject `sdkapp` tick.*peer is not in current process tree' "$TMP/pm.log" && break
+    sleep .05
+done
+grep -q 'reject `sdkapp` tick.*peer is not in current process tree' "$TMP/pm.log"
 "$BIN/pm" stop sdkapp >/dev/null
 
 set +e

@@ -1,3 +1,6 @@
+//
+// Created by luo on 2021/10/5.
+//
 
 #ifndef PM_TINY_SESSION_H
 #define PM_TINY_SESSION_H
@@ -13,6 +16,7 @@
 #include <queue>
 #include <unistd.h>
 #include <memory>
+#include <functional>
 #include <string>
 #include <type_traits>
 #include "frame_stream.hpp"
@@ -27,6 +31,8 @@ namespace pm_tiny {
     public:
 
         session_t(int fd, int fd_type);
+
+        ~session_t();
 
         session_t(const session_t &) = delete;
 
@@ -77,6 +83,20 @@ namespace pm_tiny {
 
         int shutdown_read();
 
+        void set_write_notifier(std::function<void()> notifier);
+
+        void clear_write_notifier();
+
+        void set_peer_credentials(pid_t pid, uid_t uid, gid_t gid);
+
+        bool has_peer_credentials() const;
+
+        pid_t peer_pid() const;
+
+        uid_t peer_uid() const;
+
+        gid_t peer_gid() const;
+
 #if PM_TINY_SERVER
 
         void set_prog(prog_info_t *prog);
@@ -100,6 +120,11 @@ namespace pm_tiny {
         std::uint32_t current_request_id_ = 0;
         std::uint32_t next_request_id_ = 1;
         bool mark_closed_ = false;
+        std::function<void()> write_notifier_;
+        bool has_peer_credentials_ = false;
+        pid_t peer_pid_ = -1;
+        uid_t peer_uid_ = static_cast<uid_t>(-1);
+        gid_t peer_gid_ = static_cast<gid_t>(-1);
 #if PM_TINY_SERVER
         prog_info_t *prog_ = nullptr;
 

@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 2022/6/27.
+//
 
 #ifndef PM_TINY_PM_TINY_SERVER_H
 #define PM_TINY_PM_TINY_SERVER_H
@@ -12,7 +15,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <dirent.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +39,6 @@
 #include "pm_tiny.h"
 #include "pm_tiny_helper.h"
 #include "frame_stream.hpp"
-#include "procinfo.h"
 #include "prog.h"
 #include "pm_tiny_utility.h"
 #include "persistence_worker.h"

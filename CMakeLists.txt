@@ -12,7 +12,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
     set(CMAKE_ANDROID_STL_TYPE c++_static CACHE STRING
             "Android C++ runtime linkage" FORCE)
 endif ()
-project(pm_tiny VERSION 3.2.0 LANGUAGES C CXX)
+project(pm_tiny VERSION 4.0.0 LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 
@@ -33,8 +33,15 @@ if ("${CMAKE_BUILD_TYPE}" STREQUAL "")
     set(CMAKE_BUILD_TYPE "Release")
 endif ()
 
+if (PM_TINY_SANITIZER_ENABLE AND MSVC)
+    message(FATAL_ERROR "PM_TINY_SANITIZER_ENABLE currently requires GCC or Clang")
+endif ()
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Release")
     set(PM_TINY_SANITIZER_ENABLE OFF)
+endif ()
+if (PM_TINY_SANITIZER_ENABLE)
+    add_compile_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -fsanitize=address -fsanitize=undefined")
 endif ()
 message(STATUS "PM_TINY_SANITIZER_ENABLE:${PM_TINY_SANITIZER_ENABLE}")
 
@@ -231,12 +238,12 @@ else ()
     add_executable(pm_tiny
             src/daemon/pm_tiny.cpp
             src/daemon/pm_tiny_server.cpp
+            src/daemon/launch_environment.cpp
             src/daemon/child_launch_context.cpp
             src/daemon/process_reaper.cpp
             src/daemon/asio_daemon_loop.cpp
             src/daemon/prog.cpp
             src/daemon/prog_cfg.cpp
-            src/daemon/procinfo.cpp
             src/core/session.cpp
             src/core/session.h
             src/core/control_command.cpp
@@ -286,12 +293,6 @@ else ()
             pm_tiny_daemon_config
     )
 
-    if (PM_TINY_SANITIZER_ENABLE)
-        # 通过编译与链接选项启用 ASan/UBSan，避免直接手动链接 asan/ubsan 导致加载顺序问题
-        target_compile_options(pm_tiny PRIVATE -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
-        target_link_options(pm_tiny PRIVATE -fsanitize=address -fsanitize=undefined)
-    endif ()
-
     if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
         set(PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT_ENABLE ON)
     endif ()
@@ -320,10 +321,6 @@ if (PM_TINY_ON_WINDOWS)
     target_link_libraries(pm PRIVATE pm_tiny_cli_output pm_tiny_cli_command pm_tiny_protocol pm_tiny_runtime
             pm_tiny_daemon_config)
     target_link_libraries(pm PRIVATE pm_tiny_cli_connection_error)
-    add_executable(pm_sdk_ready_tick_probe tests/fixtures/sdk_ready_tick_probe.cpp)
-    target_include_directories(pm_sdk_ready_tick_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
-    target_link_libraries(pm_sdk_ready_tick_probe PRIVATE pm_sdk)
-
     if (PM_TINY_BUILD_TESTS)
         add_executable(windows_process_tree_fixture tests/fixtures/windows_process_tree_fixture.cpp)
         target_compile_definitions(windows_process_tree_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -372,6 +369,7 @@ else ()
     add_executable(pm
             src/cli/pm.cpp
             src/cli/pm_funcs.cpp
+            src/cli/posix_privilege_wrapper.cpp
             src/core/session.cpp
             src/core/pm_sys.cpp
             src/core/frame_stream.hpp
@@ -392,10 +390,6 @@ else ()
             PRIVATE yaml-cpp pm_tiny_asio pm_tiny_cli_output pm_tiny_cli_connection_error pm_tiny_cli_command
             pm_tiny_protocol pm_tiny_runtime pm_tiny_daemon_config pm_tiny_logging
     )
-    if (PM_TINY_SANITIZER_ENABLE)
-        target_compile_options(pm PRIVATE -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
-        target_link_options(pm PRIVATE -fsanitize=address -fsanitize=undefined)
-    endif ()
 endif ()
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
@@ -415,6 +409,15 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
 endif ()
 
 add_subdirectory(sdk)
+if (PM_TINY_BUILD_TESTS)
+    add_executable(pm_sdk_ready_tick_probe tests/fixtures/sdk_ready_tick_probe.cpp)
+elseif ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
+    add_executable(pm_sdk_ready_tick_probe EXCLUDE_FROM_ALL tests/fixtures/sdk_ready_tick_probe.cpp)
+endif ()
+if (TARGET pm_sdk_ready_tick_probe)
+target_include_directories(pm_sdk_ready_tick_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
+target_link_libraries(pm_sdk_ready_tick_probe PRIVATE pm_sdk)
+endif ()
 if (PM_TINY_BUILD_TESTS)
     enable_testing()
     if (PM_TINY_ON_WINDOWS)

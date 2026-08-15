@@ -19,8 +19,14 @@ pm_tiny 同时启用 child-subreaper，负责回收根进程退出后被收养�
 使用负 PGID 发信号，普通 fork 后代可以被覆盖；后代若主动执行 `setsid()` 或迁移到其他
 cgroup，无法提供 cgroup 模式的强保证。运行在 systemd 下应使用 `KillMode=control-group`。
 
+同一进程树句柄也用于 SDK 身份确认：cgroup 模式从当前应用 cgroup 的 `cgroup.procs` 确认 peer PID，
+进程组模式比较 peer 的 PGID。ready/tick 因此只能推进当前 generation，不能由同 UID 的无关进程冒充。
+
 pm_tiny 被不可捕获地 `SIGKILL` 时无法在进程内执行清理；systemd/Android init 负责监督
 器级清理，pm_tiny 下次启动也会扫描并清理本实例遗留的 cgroup。
+
+正常启动不会按命令行扫描或终止系统中的外部进程。实例所有权只来自本次启动建立的 cgroup/进程组、
+child-subreaper 和上层 systemd/init 监督边界。
 
 Windows 为每次启动创建独立进程组和 Job Object，并在子进程恢复执行前将其加入 Job。
 stop、delete、restart、reload、timeout 和 quit 使用统一流程：先向该 generation 的进程组

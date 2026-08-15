@@ -20,12 +20,22 @@
 
 namespace pm_tiny {
 
+namespace {
+constexpr std::size_t max_control_sessions = 256;
+constexpr std::size_t max_messages_per_dispatch = 32;
+
+bool is_accept_resource_error(int error) {
+    return error == EMFILE || error == ENFILE || error == ENOBUFS || error == ENOMEM;
+}
+}
+
 class asio_daemon_loop::impl {
 public:
     impl(pm_tiny_server_t &server, int listen_fd, int signal_fd, std::function<int()> maintenance)
         : server_(server), io_(), listen_fd_(listen_fd), maintenance_(std::move(maintenance)),
           listen_wait_(io_, ::dup(listen_fd)),
-          signal_wait_(io_, signal_fd >= 0 ? ::dup(signal_fd) : -1) {}
+          signal_wait_(io_, signal_fd >= 0 ? ::dup(signal_fd) : -1),
+          accept_retry_(io_) {}
 
     ~impl() {
         stop();
@@ -47,26 +57,54 @@ public:
         listen_wait_.close(ignored);
         signal_wait_.close(ignored);
         timer_.cancel();
-        for (auto &entry : sessions_) entry.second->close(ignored);
+        for (auto &entry : sessions_) {
+            entry.second->removed = true;
+            entry.second->session->clear_write_notifier();
+            entry.second->descriptor->close(ignored);
+            entry.second->session->close();
+        }
         sessions_.clear();
         for (auto &entry : pipes_) entry.second->close(ignored);
         pipes_.clear();
+        accept_retry_.cancel();
     }
 
 private:
     using descriptor_ptr = std::shared_ptr<asio::posix::stream_descriptor>;
 
-    void remove_session(const session_ptr_t &session, int fd) {
-        sessions_.erase(fd);
-        if (session && !session->is_close()) session->close();
+    struct session_state {
+        session_ptr_t session;
+        descriptor_ptr descriptor;
+        int fd = -1;
+        bool read_wait = false;
+        bool write_wait = false;
+        bool dispatch_posted = false;
+        bool removed = false;
+    };
+
+    using session_state_ptr = std::shared_ptr<session_state>;
+
+    void remove_session(const session_state_ptr &state) {
+        if (!state || state->removed) return;
+        state->removed = true;
+        state->session->clear_write_notifier();
+        auto found = sessions_.find(state->fd);
+        if (found != sessions_.end() && found->second == state) sessions_.erase(found);
+        asio::error_code ignored;
+        state->descriptor->close(ignored);
+        if (!state->session->is_close()) state->session->close();
         auto &owned = server_.sessions;
-        owned.erase(std::remove(owned.begin(), owned.end(), session), owned.end());
+        owned.erase(std::remove(owned.begin(), owned.end(), state->session), owned.end());
     }
 
     void wait_listen() {
+        if (stopped_ || listen_wait_active_) return;
+        listen_wait_active_ = true;
         listen_wait_.async_wait(asio::posix::stream_descriptor::wait_read,
                                 [this](const asio::error_code &error) {
+            listen_wait_active_ = false;
             if (stopped_ || error) return;
+            bool retry_later = false;
             for (;;) {
                 sockaddr_un peer{};
                 socklen_t length = sizeof(peer);
@@ -74,7 +112,17 @@ private:
                                          SOCK_NONBLOCK | SOCK_CLOEXEC);
                 if (fd < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    if (is_accept_resource_error(errno)) {
+                        PM_TINY_DLOG_ERROR_ERRNO("accept control connection");
+                        retry_later = true;
+                    }
                     break;
+                }
+                if (server_.sessions.size() >= max_control_sessions) {
+                    PM_TINY_DLOG_ERROR("reject control connection: session limit %zu reached",
+                                       max_control_sessions);
+                    ::close(fd);
+                    continue;
                 }
 #ifdef SO_PEERCRED
                 struct ucred credential{};
@@ -90,10 +138,37 @@ private:
                 }
 #endif
                 auto session = std::make_shared<session_t>(fd, 0);
+#ifdef SO_PEERCRED
+                session->set_peer_credentials(credential.pid, credential.uid, credential.gid);
+#endif
+                const int duplicate = ::dup(fd);
+                if (duplicate < 0) {
+                    PM_TINY_DLOG_ERROR_ERRNO("duplicate control connection");
+                    session->close();
+                    continue;
+                }
+                auto state = std::make_shared<session_state>();
+                state->session = session;
+                state->descriptor = std::make_shared<asio::posix::stream_descriptor>(io_, duplicate);
+                state->fd = fd;
+                sessions_.emplace(fd, state);
+                std::weak_ptr<session_state> weak_state = state;
+                session->set_write_notifier([this, weak_state]() {
+                    asio::post(io_, [this, weak_state]() {
+                        if (auto state = weak_state.lock()) arm_session_write(state);
+                    });
+                });
                 server_.sessions.emplace_back(session);
-                arm_session(session);
+                arm_session_read(state);
             }
-            wait_listen();
+            if (retry_later) {
+                accept_retry_.expires_after(std::chrono::milliseconds(250));
+                accept_retry_.async_wait([this](const asio::error_code &retry_error) {
+                    if (!stopped_ && !retry_error) wait_listen();
+                });
+            } else {
+                wait_listen();
+            }
         });
     }
 
@@ -117,60 +192,97 @@ private:
         });
     }
 
-    void arm_session(const session_ptr_t &session) {
-        if (stopped_ || !session || session->is_close()) return;
-        auto iter = sessions_.find(session->get_fd());
-        if (iter == sessions_.end()) {
-            const int duplicate = ::dup(session->get_fd());
-            if (duplicate < 0) return;
-            auto descriptor = std::make_shared<asio::posix::stream_descriptor>(io_, duplicate);
-            iter = sessions_.emplace(session->get_fd(), descriptor).first;
+    void arm_session_read(const session_state_ptr &state) {
+        if (stopped_ || !state || state->removed || state->read_wait) return;
+        auto session = state->session;
+        if (session->is_close()) {
+            remove_session(state);
+            return;
         }
-        auto descriptor = iter->second;
-        const auto fd = session->get_fd();
-        descriptor->async_wait(asio::posix::stream_descriptor::wait_read,
-                               [this, session, descriptor, fd](const asio::error_code &error) {
-            if (stopped_) return;
+        if (session->is_marked_close()) {
+            if (session->sbuf_empty()) remove_session(state);
+            else arm_session_write(state);
+            return;
+        }
+        state->read_wait = true;
+        state->descriptor->async_wait(asio::posix::stream_descriptor::wait_read,
+                               [this, state](const asio::error_code &error) {
+            state->read_wait = false;
+            if (stopped_ || state->removed) return;
             if (error) {
-                remove_session(session, fd);
+                remove_session(state);
                 return;
             }
-            if (!session->is_close()) {
-                handle_session_read(session);
-            }
-            if (session->is_close()) {
-                remove_session(session, fd);
+            const int rc = state->session->read();
+            if (rc < 0 || state->session->is_close()) {
+                remove_session(state);
                 return;
             }
-            if (session->sbuf_size() > 0) {
-                descriptor->async_wait(asio::posix::stream_descriptor::wait_write,
-                    [this, session, descriptor, fd](const asio::error_code &write_error) {
-                        if (stopped_) return;
-                        if (write_error) {
-                            remove_session(session, fd);
-                            return;
-                        }
-                        session->write();
-                        if (session->is_close()) remove_session(session, fd);
-                        else arm_session(session);
-                    });
-            } else {
-                arm_session(session);
-            }
+            dispatch_messages(state);
+            arm_session_write(state);
+            arm_session_read(state);
         });
     }
 
-    void handle_session_read(session_ptr_t session) {
-        auto message = session->read_message();
-        if (message.type == 0 || session->is_close()) return;
-        try {
-            handle_frame(server_, message, session);
-        } catch (const BufferInsufficientException &) {
-            auto error = std::make_unique<frame_t>();
-            fappend_value<std::int32_t>(*error, -1);
-            fappend_value(*error, std::string("Invalid argument"));
-            session->write_frame(error);
-            session->shutdown_read();
+    void arm_session_write(const session_state_ptr &state) {
+        if (stopped_ || !state || state->removed || state->write_wait) return;
+        auto session = state->session;
+        if (session->is_close()) {
+            remove_session(state);
+            return;
+        }
+        if (session->sbuf_empty()) {
+            if (session->is_marked_close()) remove_session(state);
+            return;
+        }
+        state->write_wait = true;
+        state->descriptor->async_wait(asio::posix::stream_descriptor::wait_write,
+                                      [this, state](const asio::error_code &error) {
+            state->write_wait = false;
+            if (stopped_ || state->removed) return;
+            if (error) {
+                remove_session(state);
+                return;
+            }
+            state->session->write();
+            if (state->session->is_close() ||
+                (state->session->is_marked_close() && state->session->sbuf_empty())) {
+                remove_session(state);
+                return;
+            }
+            arm_session_write(state);
+        });
+    }
+
+    void dispatch_messages(const session_state_ptr &state) {
+        if (!state || state->removed || state->session->is_close()) return;
+        std::size_t handled = 0;
+        while (handled < max_messages_per_dispatch && !state->session->rbuf_empty() &&
+               !state->session->is_marked_close() && !state->session->is_close()) {
+            auto message = state->session->read_message();
+            if (message.type == 0) break;
+            try {
+                handle_frame(server_, message, state->session);
+            } catch (const BufferInsufficientException &) {
+                auto error = std::make_unique<frame_t>();
+                fappend_value<std::int32_t>(*error, -1);
+                fappend_value(*error, std::string("Invalid argument"));
+                state->session->write_frame(error);
+                state->session->shutdown_read();
+            }
+            ++handled;
+            if (state->session->is_close()) break;
+        }
+        arm_session_write(state);
+        if (!state->session->rbuf_empty() && !state->session->is_marked_close() &&
+            !state->dispatch_posted) {
+            state->dispatch_posted = true;
+            asio::post(io_, [this, state]() {
+                state->dispatch_posted = false;
+                if (stopped_ || state->removed) return;
+                dispatch_messages(state);
+                arm_session_read(state);
+            });
         }
     }
 
@@ -231,18 +343,27 @@ private:
     void run_maintenance() {
         if (stopped_) return;
         refresh_pipes();
+        std::vector<session_state_ptr> expired_sessions;
+        for (const auto &entry : sessions_) {
+            const auto &state = entry.second;
+            if (state->session->is_close() ||
+                (state->session->is_marked_close() && state->session->sbuf_empty())) {
+                expired_sessions.push_back(state);
+            }
+        }
+        for (const auto &state : expired_sessions) remove_session(state);
         auto &owned = server_.sessions;
-        for (auto iter = owned.begin(); iter != owned.end();) {
-            if (!*iter || (*iter)->is_close()) iter = owned.erase(iter);
-            else ++iter;
+        owned.erase(std::remove_if(owned.begin(), owned.end(), [](const session_ptr_t &session) {
+            return !session || session->is_close();
+        }), owned.end());
+        for (const auto &entry : sessions_) {
+            arm_session_write(entry.second);
+            arm_session_read(entry.second);
         }
         const int next_delay = maintenance_ ? maintenance_() : 1000;
         if (next_delay < 0) {
             stop();
             return;
-        }
-        for (auto &session : server_.sessions) {
-            if (session && !session->is_close() && session->sbuf_size() > 0) arm_session(session);
         }
         arm_timer(next_delay);
     }
@@ -254,8 +375,10 @@ private:
     asio::posix::stream_descriptor listen_wait_;
     asio::posix::stream_descriptor signal_wait_;
     asio::steady_timer timer_{io_};
-    std::unordered_map<int, descriptor_ptr> sessions_;
+    asio::steady_timer accept_retry_;
+    std::unordered_map<int, session_state_ptr> sessions_;
     std::unordered_map<int, descriptor_ptr> pipes_;
+    bool listen_wait_active_ = false;
     bool stopped_ = false;
 };
 

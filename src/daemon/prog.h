@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 2022/6/27.
+//
 
 #ifndef PM_TINY_PROG_H
 #define PM_TINY_PROG_H
@@ -12,7 +15,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <dirent.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +40,6 @@
 #include "pm_tiny.h"
 #include "pm_tiny_helper.h"
 #include "frame_stream.hpp"
-#include "procinfo.h"
 #include "dependency_graph.h"
 #include "pm_tiny_enum.h"
 #include "restart_policy.h"
@@ -210,12 +211,14 @@ namespace pm_tiny {
     };
 
     inline void delete_prog(prog_ptr_t prog) {
+        if (prog == nullptr) return;
+        prog->detach_sessions();
         delete prog;
     }
 
     inline void delete_proglist(proglist_t &pl) {
         for (auto p: pl) {
-            delete p;
+            delete_prog(p);
         }
     }
     std::ostream &operator<<(std::ostream &os, struct prog_info_t const &prog);

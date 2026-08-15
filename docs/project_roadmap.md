@@ -62,7 +62,8 @@ GitHub Star、语言和功能数量只用于了解项目生态，不作为 PM_Ti
 
 目标是从“进程仍存在”提升到“服务实际可用”，并减少 reload 的业务扰动。
 
-- 将 SDK ready/tick 归入统一 readiness/liveness 状态模型，保留现有 SDK 的低成本路径。
+- 将 SDK 4.0 ready/tick 进一步归入统一 readiness/liveness 状态模型；当前已具备固定槽合并、持久连接、
+  状态快照、可取消关闭和有界重连的低成本路径。
 - 增加可选 exec、TCP、HTTP 健康检查；仅在配置启用时创建相关任务，不在核心中常驻 HTTP 服务。
 - 依赖条件扩展为 `started`、`ready`、`healthy`，明确依赖失效后等待、停止和恢复策略。
 - 将 reload 改为配置差异驱动：只停止和重启受影响进程，并按依赖图传播必要变更。

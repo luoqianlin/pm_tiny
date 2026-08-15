@@ -9,7 +9,8 @@ pm_tiny_app_log_dir: /var/log/pm_tiny/logs
 # daemon 日志配置可由同名环境变量或长选项覆盖。
 pm_tiny_app_environ_dir: /usr/local/pm_tiny/environ
 pm_tiny_uds_abstract_namespace: false
-# daemon 自身 UID 始终允许；按需追加其他 CLI 或应用 SDK 身份。
+# daemon 自身 UID 始终允许；其他条目拥有全部控制权限，包括以 root 动态启动程序。
+# 只添加完全可信的身份；受管应用 UID 一旦加入也会获得全部控制权限。
 pm_tiny_allowed_uids: []
 pm_tiny_allowed_gids: []
 pm_tiny_process_tree_mode: auto

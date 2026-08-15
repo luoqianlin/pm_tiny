@@ -1,3 +1,6 @@
+//
+// Created by luo on 2021/10/5.
+//
 
 #include "session.h"
 #include <algorithm>
@@ -54,8 +57,13 @@ namespace pm_tiny {
 //               this->fsbuf_size_, this->frbuf_size_, this->fd_nonblock_);
     }
 
+    session_t::~session_t() {
+        close();
+    }
+
     void session_t::close() {
         if (this->fd_ >= 0) {
+            write_notifier_ = {};
 #if PM_TINY_SERVER
             if (prog_) {
                 prog_->remove_session(this);
@@ -240,6 +248,7 @@ namespace pm_tiny {
             do {
                 n += this->write();
             } while (block && this->sbuf_size() > 0 && !this->is_close());
+            if (!this->sbuf_empty() && write_notifier_) write_notifier_();
             return n;
         } else {
             return -1;
@@ -264,6 +273,7 @@ namespace pm_tiny {
         this->send_buf.emplace_back(std::move(wf));
         int n = 0;
         do { n += this->write(); } while (block && this->sbuf_size() > 0 && !this->is_close());
+        if (!this->sbuf_empty() && write_notifier_) write_notifier_();
         return n;
     }
 
@@ -285,6 +295,7 @@ namespace pm_tiny {
         this->send_buf.emplace_back(std::move(wf));
         int n = 0;
         do { n += this->write(); } while (block && this->sbuf_size() > 0 && !this->is_close());
+        if (!this->sbuf_empty() && write_notifier_) write_notifier_();
         return n;
     }
 
@@ -300,6 +311,26 @@ namespace pm_tiny {
         this->mark_close();
         return shutdown(fd_, SHUT_RD);
     }
+
+    void session_t::set_write_notifier(std::function<void()> notifier) {
+        write_notifier_ = std::move(notifier);
+    }
+
+    void session_t::clear_write_notifier() {
+        write_notifier_ = {};
+    }
+
+    void session_t::set_peer_credentials(pid_t pid, uid_t uid, gid_t gid) {
+        has_peer_credentials_ = true;
+        peer_pid_ = pid;
+        peer_uid_ = uid;
+        peer_gid_ = gid;
+    }
+
+    bool session_t::has_peer_credentials() const { return has_peer_credentials_; }
+    pid_t session_t::peer_pid() const { return peer_pid_; }
+    uid_t session_t::peer_uid() const { return peer_uid_; }
+    gid_t session_t::peer_gid() const { return peer_gid_; }
 
 #if PM_TINY_SERVER
 

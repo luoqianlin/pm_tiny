@@ -13,6 +13,13 @@ pm start <name> [options] -- <executable> [args...]
 
 动态定义继承 CLI 环境，但过滤所有 `PM_TINY_*`。显式 `--env KEY=VALUE` 覆盖同名继承值；显式设置 `PM_TINY_*` 会在 CLI 解析阶段失败。`pm save` 在三平台都将完整继承快照写入 `schema: 1` 的 YAML sidecar；显式覆盖统一保留在 `prog.yaml` 的 `env_vars`，reload 后仍由显式值优先。3.1 不读取旧的无扩展名逐行环境文件，也不接受旧 Windows `inherited_env` 字段。
 
+Linux/Android 动态启动省略 `--user` 时，由 daemon 使用 `SO_PEERCRED` 的 UID 查找账户，不能解析时
+直接失败，不会回退为 daemon 身份。显式目标账户与调用方 UID/GID 不同时，executable 必须包含 `/`；
+daemon 从继承快照移除 `PATH`、`SUDO_*` 和 `LD_*`，按目标 passwd 重建 `HOME`、`USER`、`LOGNAME`
+和 `SHELL`，再应用显式 `--env`。因此需要 PATH 或动态链接器变量时必须明确配置。清理后的快照会随
+`pm save` 持久化，reload 和自动重启保持一致；root 所有的文件配置及 sidecar 视为管理员显式输入。
+直接启动 `sudo`、`su` 或 `doas` 时 CLI 会警告，但不会阻止 `sudo -n` 等非交互用法。
+
 PTY 默认关闭。Linux/Android 可显式启用；启用 PTY 且未指定日志模式时自动使用 `combined`，显式组合 `pty: true` 与 `log_mode: split` 会失败。Windows 对 `--pty`、非空 `--user`、非零 `--oom-score-adj` 和非 `skip` 的 `--failure-action` 返回错误。
 
 Linux/Android 与 Windows 的日志目录和文件名规则一致：空 `log_dir` 使用 daemon 的应用日志目录，`combined` 默认 `<name>.log`，`split` 默认 `<name>_stdout.log` 与 `<name>_stderr.log`；配置 `api.log` 时 split 派生为 `api_stdout.log` 与 `api_stderr.log`。当前文件无编号，`.1` 是最新历史文件。`log_archive_count` 表示历史文件数量，允许为 0。Windows 旧字段 `log_size_kb`、`log_files`、`log_file`、`log_file_count` 已删除并明确拒绝。

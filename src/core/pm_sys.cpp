@@ -1,3 +1,6 @@
+//
+// Created by luo on 2021/10/7.
+//
 
 #include "pm_sys.h"
 #include <unistd.h>
@@ -261,28 +264,8 @@ namespace pm_tiny {
         return vm_rss_kib;
     }
 
-    int get_uid_from_username(const char *name, passwd_t &passwd_) {
-        struct passwd pwd;
-        struct passwd *result;
-        int s;
-        auto bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
-        if (bufsize == -1) {          /* Value was indeterminate */
-            bufsize = 16384;        /* Should be more than enough */
-        }
-        std::unique_ptr<char[]> buf(new char[bufsize]);
-        errno = 0;
-        s = getpwnam_r(name, &pwd, buf.get(), bufsize, &result);
-        if (result == nullptr) {
-            if (s == 0) {
-                errno = 0;
-            } else {
-                errno = s;
-            }
-            return -1;
-        }
-
-        //fix in android
-        // pwd.pw_dir:/,pwd.pw_gecos:(null),pwd.pw_name:root,pwd.pw_passwd:(null),pwd.pw_shell:/bin/sh
+    namespace {
+    void copy_passwd(const struct passwd &pwd, passwd_t &passwd_) {
 #define ASSIGN_CHECK_NULL(str) (str)==nullptr ? "":(str)
         passwd_.pw_dir = ASSIGN_CHECK_NULL(pwd.pw_dir);
         passwd_.pw_gecos = ASSIGN_CHECK_NULL(pwd.pw_gecos);
@@ -291,6 +274,46 @@ namespace pm_tiny {
         passwd_.pw_passwd = ASSIGN_CHECK_NULL(pwd.pw_passwd);
         passwd_.pw_shell = ASSIGN_CHECK_NULL(pwd.pw_shell);
         passwd_.pw_uid = pwd.pw_uid;
+#undef ASSIGN_CHECK_NULL
+    }
+
+    long passwd_buffer_size() {
+        const auto configured = sysconf(_SC_GETPW_R_SIZE_MAX);
+        return configured > 0 ? configured : 16384;
+    }
+    }
+
+    int get_uid_from_username(const char *name, passwd_t &passwd_) {
+        struct passwd pwd;
+        struct passwd *result;
+        int s;
+        const auto bufsize = passwd_buffer_size();
+        std::unique_ptr<char[]> buf(new char[bufsize]);
+        errno = 0;
+        s = getpwnam_r(name, &pwd, buf.get(), bufsize, &result);
+        if (result == nullptr) {
+            errno = s == 0 ? ENOENT : s;
+            return -1;
+        }
+
+        //fix in android
+        // pwd.pw_dir:/,pwd.pw_gecos:(null),pwd.pw_name:root,pwd.pw_passwd:(null),pwd.pw_shell:/bin/sh
+        copy_passwd(pwd, passwd_);
+        return 0;
+    }
+
+    int get_user_from_uid(uid_t uid, passwd_t &passwd_) {
+        struct passwd pwd;
+        struct passwd *result;
+        const auto bufsize = passwd_buffer_size();
+        std::unique_ptr<char[]> buf(new char[bufsize]);
+        errno = 0;
+        const int status = getpwuid_r(uid, &pwd, buf.get(), bufsize, &result);
+        if (result == nullptr) {
+            errno = status == 0 ? ENOENT : status;
+            return -1;
+        }
+        copy_passwd(pwd, passwd_);
         return 0;
     }
 

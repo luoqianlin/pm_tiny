@@ -81,6 +81,12 @@ Android builds statically link libc++, so binaries do not depend on `libc++_shar
 
 Use `pm --help` (`pm2 --help` on Android) for all options. `list --json` and `graph --json` provide stable structured output for automation.
 
+On Linux/Android, run a root `pm_tiny` daemon and let it switch identity directly, for example
+`pm start task --user root -- /usr/local/bin/task`; interactive `sudo` is not supported. When `--user` is
+omitted, the daemon uses the real UID of the CLI connection. Cross-user starts require an executable path and
+remove inherited PATH, `SUDO_*`, and `LD_*`; restore required values explicitly with `--env`. Every UID/GID in
+the daemon allowlist has full administrative control.
+
 ## Minimal Dependency Configuration
 
 ```yaml

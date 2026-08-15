@@ -1,3 +1,6 @@
+//
+// Created by luo on 2021/10/7.
+//
 
 #ifndef PM_TINY_PM_SYS_H
 #define PM_TINY_PM_SYS_H
@@ -62,6 +65,7 @@ namespace pm_tiny {
     long long get_vm_rss_kib(int pid);
 
     int get_uid_from_username(const char *name, passwd_t &passwd);
+    int get_user_from_uid(uid_t uid, passwd_t &passwd);
     int create_pty(struct pty_info *p);
     int  tcsetattr_stdin_TCSANOW(const struct ::termios *tp);
 

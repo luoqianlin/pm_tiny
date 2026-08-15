@@ -20,6 +20,7 @@ public:
                     const std::string &instance_key, std::string &reason);
     bool attach(pid_t pid, process_tree_handle &handle, std::string &reason) const;
     int signal(const process_tree_handle &handle, int signo) const;
+    bool contains(const process_tree_handle &handle, pid_t pid) const;
     bool empty(const process_tree_handle &handle) const;
     void cleanup(process_tree_handle &handle) const;
     process_tree_mode effective_mode() const { return effective_mode_; }

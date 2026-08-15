@@ -32,6 +32,11 @@ cleanup() {
     fi
     "${ADB[@]}" pull "$REMOTE_BASE" "$ARTIFACT_DIR/remote" >/dev/null 2>&1
     "${ADB[@]}" shell "rm -rf '$REMOTE_BASE'"
+    if [[ -f "$ARTIFACT_DIR/production-before.json" ]]; then
+        capture_production_state "$ARTIFACT_DIR/production-after.json" || exit_code=1
+        assert_production_unchanged "$ARTIFACT_DIR/production-before.json" \
+            "$ARTIFACT_DIR/production-after.json" || exit_code=1
+    fi
     printf 'status=%s\nexit_code=%d\n' "$FINAL_STATUS" "$exit_code" > "$ARTIFACT_DIR/result.txt"
     return "$exit_code"
 }
@@ -53,7 +58,7 @@ try:
     item = next(item for item in data["processes"] if item["name"] == "crash_loop")
 except Exception:
     raise SystemExit(1)
-assert data["schema_version"] == 3
+assert data["schema_version"] == 5
 assert item["state"] == "stopped"
 assert item["restart_count"] == expected
 assert item["restart_pending"] is False

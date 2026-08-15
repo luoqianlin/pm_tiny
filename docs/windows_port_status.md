@@ -14,7 +14,8 @@
 - Linux/Android 与 Windows 共用 `src/core/termination_job.*` 终止状态机，按 generation 隔离实例；根进程退出由同一 `io_context` 上的 `object_handle` 异步通知，退出后仍等待 Job Object 清空，不会遗漏后代。
 - 分别捕获 stdout/stderr，按公共 `split`/`combined` 规则写入日志；默认目录为配置文件同级 `logs`，文件名、大小、`.1` 历史命名、保留数和降级重试语义与 Linux 一致。每个 generation 使用 overlapped 命名管道接入同一 `io_context`，不为程序创建日志线程。
 - 响应控制台 Ctrl+C/Close 事件，优雅停止子进程并清理资源。
-- Windows SDK 已生成 `pm_sdk`，通过 standalone Asio 的 overlapped named pipe 发送 v3 `APP_READY`/`APP_TICK`。
+- Windows SDK 4.0 已生成 `pm_sdk`，使用可取消 overlapped named pipe 持久连接发送 v3
+  `APP_READY`/`APP_TICK`，与 Linux/Android 共用事件合并、状态快照和退避语义。
 - standalone Asio 1.30.2 已固定在 `dependencies/asio`，CMake 配置不需要访问 GitHub，并会拒绝缺失或版本错误的副本。
 - 控制管道 accept、控制会话、根进程退出和日志读取共用 daemon 主线程上的一个 `io_context`，不为连接或程序创建线程。不完整帧超过 5 秒后关闭，其余连接和进程状态机继续运行；正常等待日志的空闲会话不受该超时影响。运行时按最近的启动、心跳、重启和终止期限使用 `run_one_for` 等待，任一异步事件到达即返回状态机，空闲等待上限为 1 秒，仅在持久化任务和 Job Object drain 阶段保留短周期检查。
 - 默认控制管道 SDDL 只允许 `SYSTEM` 和本机管理员；`--pipe-sddl` 会应用到每一个 `CreateNamedPipeW` 实例，非法 SDDL 会导致 daemon 明确启动失败。
@@ -25,7 +26,7 @@
 - Windows 已实现与 Linux/Android 相同的 `PM_TINY_HOME`、日志、程序配置、应用日志和环境快照
   路径派生；前台默认 `%USERPROFILE%\.pm_tiny`，SCM 安装默认 `%ProgramData%\pm_tiny`。
 - `depends_on` 使用跨平台公共不可变依赖图和启动状态机，统一校验、ready 解锁、failed/blocked 传播与恢复；退出和 reload 按逆拓扑顺序停止。
-- Windows CTest 已覆盖全部 v3 命令、日志分片、SDK ready/tick、依赖顺序、启动/心跳超时、异常帧恢复、100 进程线程数稳定、1000 次短连接句柄稳定、非法 SDDL 拒绝、慢日志客户端隔离及 `pm log` Ctrl+C 返回 130。
+- Windows CTest 已覆盖全部 v3 命令、日志分片、SDK ready/tick、依赖顺序、启动/心跳超时、异常帧恢复、100 进程线程数稳定、1000 次短连接句柄及 Private Bytes 稳定、非法 SDDL 拒绝、慢日志客户端隔离及 `pm log` Ctrl+C 返回 130。
 
 ## 与 Linux 的功能差异
 
@@ -120,6 +121,20 @@ SCM 集成测试会实际安装临时服务、验证 `version` 管道响应，�
 
 ## 自动化验证
 
+### Git 同步
+
+Windows 验证端应从 Git 远端获取待验证提交，不使用文件复制、补丁包或压缩包覆盖源码：
+
+```powershell
+git fetch <remote>
+git switch <branch>
+git pull --ff-only <remote> <branch>
+git rev-parse HEAD
+```
+
+验证时应记录并比较源码提交 SHA；本地修改不作为源码交付。构建目录可以独立于源码目录，避免
+验证产物污染工作树。
+
 ### MSVC 构建与测试
 
 Windows 正式验证必须在 VS 2022 x64 Developer Command Prompt 中运行 Release 构建：
@@ -157,7 +172,7 @@ Windows 构建后运行：
 ctest --test-dir build_msvc -C Release --output-on-failure
 ```
 
-`windows_protocol_integration` 在独立临时目录和唯一命名管道中启动 daemon，覆盖 `list/graph/stop/start/save/delete/restart/version/log/ready/tick/inspect/info/reload/quit`。测试还会验证依赖图文本/JSON/DOT、日志流、依赖拓扑顺序、空配置保存和 reload、start/heartbeat timeout、异常帧恢复、崩溃循环抑制及手动恢复、100 个进程且 daemon 线程数不线性增长、慢日志客户端独立断开、`pm log` Ctrl+C 返回 130，以及 CTRL_BREAK 优雅退出、超时强杀、根进程先退出、完整后代清理和快速连续重启。失败现场保留在 `build/test-artifacts/windows`。
+`windows_protocol_integration` 在独立临时目录和唯一命名管道中启动 daemon，覆盖 `list/graph/stop/start/save/delete/restart/version/log/ready/tick/inspect/info/reload/quit`。测试还会验证依赖图文本/JSON/DOT、日志流、依赖拓扑顺序、空配置保存和 reload、start/heartbeat timeout、异常帧恢复、崩溃循环抑制及手动恢复、100 个进程且 daemon 线程数不线性增长、1000 次真实请求后句柄和 Private Bytes 不线性增长、慢日志客户端独立断开、`pm log` Ctrl+C 返回 130，以及 CTRL_BREAK 优雅退出、超时强杀、根进程先退出、完整后代清理和快速连续重启。失败现场保留在 `build/test-artifacts/windows`。
 
 Windows 服务、SSH 会话或无共享控制台启动方式可能无法投递 CTRL_BREAK；此时会记录 degraded 警告并立即调用 `TerminateJobObject()`。daemon 自身使用 Ctrl+C、控制台关闭或系统关机请求退出，CTRL_BREAK 保留给被管理进程组。
 

@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 22-8-17.
+//
 
 #ifndef PM_TINY_STRTOOLS_H
 #define PM_TINY_STRTOOLS_H

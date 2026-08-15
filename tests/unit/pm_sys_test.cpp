@@ -106,6 +106,23 @@ void test_get_vm_rss_kib() {
     expect(rss >= 0, "VmRSS should be non-negative");
 }
 
+void test_passwd_lookup() {
+    pm_tiny::passwd_t by_uid;
+    expect(pm_tiny::get_user_from_uid(::getuid(), by_uid) == 0, "current uid lookup failed");
+    expect(by_uid.pw_uid == ::getuid() && !by_uid.pw_name.empty(), "uid lookup returned wrong account");
+
+    pm_tiny::passwd_t by_name;
+    expect(pm_tiny::get_uid_from_username(by_uid.pw_name.c_str(), by_name) == 0,
+           "current username lookup failed");
+    expect(by_name.pw_uid == by_uid.pw_uid && by_name.pw_gid == by_uid.pw_gid,
+           "username lookup returned wrong account");
+
+    errno = 0;
+    expect(pm_tiny::get_uid_from_username("pm_tiny_account_that_must_not_exist", by_name) == -1,
+           "missing username should fail");
+    expect(errno == ENOENT, "missing username should set ENOENT");
+}
+
 void test_process_liveness_and_wait() {
     expect(pm_tiny::is_process_exists(static_cast<int>(::getpid())) == 1,
            "current process should be running");
@@ -186,6 +203,7 @@ int main() {
     test_set_nonblock_and_cloexec();
     test_is_directory_exists();
     test_get_vm_rss_kib();
+    test_passwd_lookup();
     test_process_liveness_and_wait();
     test_mock_process_states();
     return 0;

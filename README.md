@@ -83,6 +83,11 @@ Android 构建固定静态链接 libc++，产物不依赖 `libc++_shared.so`。
 完整参数以 `pm --help`（Android 为 `pm2 --help`）为准。`list --json`、`graph --json` 和
 `info --json` 提供适合自动化脚本使用的稳定结构化输出。
 
+Linux/Android 需要以其他用户运行动态命令时，应让 root `pm_tiny` 直接切换身份，例如
+`pm start task --user root -- /usr/local/bin/task`，不要依赖交互式 `sudo`。省略 `--user` 时 daemon
+根据 CLI 连接的真实 UID 运行；跨用户启动要求 executable 带路径，并清理继承的 PATH、`SUDO_*` 和
+`LD_*`，需要的变量应通过 `--env` 明确设置。daemon 的 UID/GID allowlist 具有完整管理权限。
+
 ## 最小依赖配置
 
 ```yaml

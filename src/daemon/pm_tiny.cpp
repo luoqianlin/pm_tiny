@@ -408,6 +408,13 @@ int next_maintenance_delay_ms(const pm_tiny_server_t &server) {
 
 int open_uds_listen_fd(const std::string &sock_path
                        ,bool enable_abstract_namespace) {
+    const std::size_t max_path = sizeof(((struct sockaddr_un *)nullptr)->sun_path);
+    if ((enable_abstract_namespace && sock_path.size() > max_path - 2) ||
+        (!enable_abstract_namespace && sock_path.size() >= max_path)) {
+        PM_TINY_DLOG_ERROR("Unix socket address is too long (%zu bytes)", sock_path.size());
+        errno = ENAMETOOLONG;
+        return -1;
+    }
     int sfd;
     struct sockaddr_un my_addr{};
     sfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -422,11 +429,11 @@ int open_uds_listen_fd(const std::string &sock_path
     if (enable_abstract_namespace) {
         my_addr.sun_path[0] = '\0';
         strncpy(my_addr.sun_path + 1, sock_path.c_str(), sizeof(my_addr.sun_path) - 2);
-        addr_length = offsetof(struct sockaddr_un, sun_path) + sock_path.length() + 1;
+        addr_length = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + sock_path.length() + 1);
     } else {
         strncpy(my_addr.sun_path, sock_path.c_str(),
                 sizeof(my_addr.sun_path) - 1);
-        addr_length = sizeof(struct sockaddr_un);
+        addr_length = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + sock_path.length() + 1);
     }
     int rc = pm_tiny::set_nonblock(sfd);
     if (rc < 0) {

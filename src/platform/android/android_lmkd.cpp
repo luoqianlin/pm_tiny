@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 24-7-31.
+//
 #include "android_lmkd.h"
 
 #include <stdio.h>

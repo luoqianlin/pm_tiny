@@ -55,6 +55,7 @@ private:
     friend class AsyncNamedPipeServer::impl;
     class impl;
     explicit AsyncNamedPipeSession(std::unique_ptr<impl> impl);
+    void write_next();
     std::unique_ptr<impl> impl_;
 };
 

@@ -1,14 +1,18 @@
+//
+// Created by qianlinluo@foxmail.com on 2022/6/27.
+//
 #include "pm_tiny_server.h"
 #include "time_util.h"
 #include "daemon_log.h"
 #include "signal_util.h"
 #include "globals.h"
 #include "prog_cfg.h"
+#include "launch_environment.h"
 #include <termios.h>
 #include <unistd.h>
 #include <algorithm>
-#include <unordered_map>
 #include <sys/prctl.h>
+#include <grp.h>
 #include <poll.h>
 #include "android_lmkd.h"
 #include "child_launch_context.h"
@@ -16,28 +20,30 @@
 namespace pm_tiny {
 
 namespace {
+class signal_mask_guard {
+public:
+    bool block_all() {
+        if (mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK, &old_mask_) == -1) return false;
+        active_ = true;
+        return true;
+    }
+
+    void restore() {
+        if (!active_) return;
+        sigprocmask(SIG_SETMASK, &old_mask_, nullptr);
+        active_ = false;
+    }
+
+    ~signal_mask_guard() { restore(); }
+
+private:
+    sigset_t old_mask_{};
+    bool active_ = false;
+};
+
 std::string env_key(const std::string &entry) {
     const auto separator = entry.find('=');
     return separator == std::string::npos ? std::string() : entry.substr(0, separator);
-}
-
-std::vector<std::string> effective_environment(const prog_info_t &prog) {
-    std::vector<std::string> result;
-    std::unordered_map<std::string, std::size_t> indices;
-    const auto apply = [&](const std::string &entry) {
-        const auto key = env_key(entry);
-        if (key.empty() || key.compare(0, 8, "PM_TINY_") == 0) return;
-        const auto found = indices.find(key);
-        if (found == indices.end()) {
-            indices[key] = result.size();
-            result.push_back(entry);
-        } else {
-            result[found->second] = entry;
-        }
-    };
-    for (const auto &entry : prog.envs) apply(entry);
-    for (const auto &entry : prog.env_vars) apply(entry);
-    return result;
 }
 
 std::string find_env_value(const std::vector<std::string> &environment, const std::string &key) {
@@ -266,6 +272,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         auto start_progs = progs_from_names(names);
         const auto failures = spawn0(start_progs);
         if (!failures.empty()) {
+            const int spawn_errno = errno == 0 ? EIO : errno;
             pm_tiny_progs.remove(prog);
             const auto remaining = std::vector<prog_ptr_t>(pm_tiny_progs.begin(), pm_tiny_progs.end());
             std::string rebuild_error;
@@ -274,7 +281,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 dependency_graph_ = std::move(rebuilt);
                 dependency_runtime_.migrate(dependency_graph_, runtime_snapshot);
             }
-            errno = EIO;
+            errno = spawn_errno;
             return -1;
         }
         return 0;
@@ -518,6 +525,33 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
 
     int pm_tiny_server_t::real_spawn_prog(pm_tiny::prog_info_t &prog) {
         int tmp_errno;
+        passwd_t target_user;
+        const bool change_identity = !prog.run_as.empty();
+        const bool privileged = geteuid() == 0;
+        if (change_identity) {
+            if (get_uid_from_username(prog.run_as.c_str(), target_user) == -1) {
+                PM_TINY_DLOG_ERROR_ERRNO("resolve user `%s`", prog.run_as.c_str());
+                return -1;
+            }
+            if (!privileged &&
+                (target_user.pw_uid != geteuid() || target_user.pw_gid != getegid())) {
+                errno = EPERM;
+                PM_TINY_DLOG_ERROR("non-root daemon cannot run `%s` as user `%s` (uid=%u gid=%u)",
+                                   prog.name.c_str(), prog.run_as.c_str(),
+                                   static_cast<unsigned>(target_user.pw_uid),
+                                   static_cast<unsigned>(target_user.pw_gid));
+                return -1;
+            }
+        }
+        const auto environment = compose_launch_environment(
+            prog.envs, prog.env_vars, nullptr, false);
+        const auto executable = resolve_executable(prog, environment);
+        if (executable.empty()) {
+            errno = ENOENT;
+            PM_TINY_DLOG_ERROR("resolve executable `%s` using target PATH failed", prog.executable.c_str());
+            return -1;
+        }
+
         pm_tiny::child_launch_context launch;
         if (launch.prepare(prog.use_pty) == -1) {
             tmp_errno = errno;
@@ -525,15 +559,13 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             errno = tmp_errno;
             return -1;
         }
-        sigset_t omask;
         /* Careful: don't be affected by a signal in vforked child */
-        mgr::utils::signal::sigprocmask_allsigs(SIG_BLOCK, &omask);
-        const auto environment = effective_environment(prog);
-        const auto executable = resolve_executable(prog, environment);
-        if (executable.empty()) {
-            errno = ENOENT;
-            PM_TINY_DLOG_ERROR("resolve executable `%s` using target PATH failed", prog.executable.c_str());
+        signal_mask_guard signal_mask;
+        if (!signal_mask.block_all()) {
+            tmp_errno = errno;
+            PM_TINY_DLOG_ERROR_ERRNO("block signals before fork");
             launch.close_all();
+            errno = tmp_errno;
             return -1;
         }
         std::vector<char *> envp;
@@ -557,7 +589,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         pid_t pid = fork();
         if (pid < 0) {
             tmp_errno = errno;
-            sigprocmask(SIG_SETMASK, &omask, nullptr);
+            signal_mask.restore();
             PM_TINY_DLOG_ERROR_ERRNO("fork");
             launch.close_all();
             errno = tmp_errno;
@@ -565,7 +597,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         }
         if (pid > 0) {
             launch.close_parent_ends();
-            sigprocmask(SIG_SETMASK, &omask, nullptr);
+            signal_mask.restore();
             prog.instance.begin(pid);
             std::string tree_reason;
             if (!this->process_tree->attach(pid, prog.instance.tree, tree_reason)) {
@@ -683,11 +715,12 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
 //            rc = pm_tiny::set_sigaction(SIGPIPE, SIG_DFL);
 //            if (rc == -1) {
 //            }
-            if (!prog.run_as.empty()) {
-                passwd_t passwd;
-                rc = get_uid_from_username(prog.run_as.c_str(), passwd);
+            if (change_identity && privileged) {
+                rc = initgroups(target_user.pw_name.c_str(), target_user.pw_gid);
                 if (rc == -1) child_fail(errno);
-                rc = setreuid(passwd.pw_uid, passwd.pw_uid);
+                rc = setresgid(target_user.pw_gid, target_user.pw_gid, target_user.pw_gid);
+                if (rc == -1) child_fail(errno);
+                rc = setresuid(target_user.pw_uid, target_user.pw_uid, target_user.pw_uid);
                 if (rc == -1) child_fail(errno);
             }
             if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) child_fail(errno);
@@ -713,24 +746,6 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         return 0;
     }
 
-    static int isnumeric(char *str) {
-        int i = 0;
-
-        // Empty string is not numeric
-        if (str[0] == 0)
-            return 0;
-
-        while (1) {
-            if (str[i] == 0) // End of string
-                return 1;
-
-            if (isdigit(str[i]) == 0)
-                return 0;
-
-            i++;
-        }
-    }
-
     prog_ptr_t pm_tiny_server_t::find_prog(int pid) {
         auto iter = std::find_if(this->pm_tiny_progs.begin(), this->pm_tiny_progs.end(),
                                  [&pid](const prog_ptr_t &p) {
@@ -743,55 +758,6 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
     }
 
     int pm_tiny_server_t::spawn_prog(pm_tiny::prog_info_t &prog) {
-        do {
-            DIR *procdir = opendir(procdir_path);
-            if (procdir == nullptr) {
-                PM_TINY_DLOG_ERROR_ERRNO("cannot open %s dir", procdir_path);
-                break;
-            }
-            while (true) {
-                errno = 0;
-                struct dirent *d = readdir(procdir);
-                if (d == nullptr) {
-                    if (errno != 0) {
-                        PM_TINY_DLOG_ERROR_ERRNO("readdir");
-                    }
-                    break;
-                }
-                // proc contains lots of directories not related to processes,
-                // skip them
-                if (!isnumeric(d->d_name))
-                    continue;
-                int pid = (int) strtol(d->d_name, nullptr, 10);
-                if (pid == getpid() || this->find_prog(pid)) {
-                    continue;
-                }
-                pm_tiny::utils::proc::procinfo_t procinfo;
-                int rc = pm_tiny::utils::proc::get_proc_info(pid, procinfo);
-                if (rc == 0) {
-                    using namespace std::string_literals;
-                    auto is_equal = [](const std::vector<std::string> &v1,
-                                       const std::vector<std::string> &v2) {
-                        if (v1.size() != v2.size())return false;
-                        for (std::vector<std::string>::size_type i = 0; i < v1.size(); i++) {
-                            if (v1[i] != v2[i]) {
-                                return false;
-                            }
-                        }
-                        return true;
-                    };
-                    if (is_equal(procinfo.cmdline, prog.args)) {
-                        auto cmd = mgr::utils::join(procinfo.cmdline);
-                        PM_TINY_DLOG_INFO("found detach pid:%d exe:%s cmdline:%s comm:%s",
-                                      pid, procinfo.exe_path.c_str(),
-                                      cmd.c_str(), procinfo.comm.c_str());
-                        pm_tiny::safe_kill_process(pid, prog.kill_timeout_sec);
-                    }
-                } else {
-                }
-            }
-            closedir(procdir);
-        } while (false);
         return real_spawn_prog(prog);
     }
 

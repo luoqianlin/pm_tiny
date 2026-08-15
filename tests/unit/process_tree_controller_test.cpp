@@ -31,6 +31,7 @@ int main() {
     if (setpgid(pid, pid) != 0 && errno != EACCES) return 8;
     pm_tiny::process_tree_handle handle;
     if (!controller.attach(pid, handle, reason)) return 9;
+    if (!controller.contains(handle, pid) || controller.contains(handle, getpid())) return 15;
     if (handle.mode != pm_tiny::process_tree_mode::process_group || controller.empty(handle)) return 10;
     if (controller.signal(handle, SIGTERM) != 0) return 11;
     int status = 0;

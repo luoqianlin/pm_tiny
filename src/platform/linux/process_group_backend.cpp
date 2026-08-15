@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <csignal>
+#include <unistd.h>
 
 namespace pm_tiny {
 
@@ -17,6 +18,12 @@ bool process_group_backend::attach(pid_t pid, process_tree_handle &handle, std::
 int process_group_backend::signal(const process_tree_handle &handle, int signo) const {
     if (!handle.active || handle.pgid <= 0) return 0;
     return ::kill(-handle.pgid, signo);
+}
+
+bool process_group_backend::contains(const process_tree_handle &handle, pid_t pid) const {
+    if (!handle.active || handle.pgid <= 0 || pid <= 0) return false;
+    const pid_t pgid = ::getpgid(pid);
+    return pgid > 0 && pgid == handle.pgid;
 }
 
 bool process_group_backend::empty(const process_tree_handle &handle) const {

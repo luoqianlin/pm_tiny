@@ -51,9 +51,18 @@ Linux/Android 平台变量为 `PM_TINY_SOCK_FILE`、`PM_TINY_UDS_ABSTRACT_NAMESP
 `PM_TINY_PROCESS_TREE_MODE` 和 `PM_TINY_CGROUP_ROOT`。Windows 平台变量为
 `PM_TINY_PIPE_NAME` 与 `PM_TINY_PIPE_SDDL`。
 
+Linux/Android 的 `pm_tiny_allowed_uids` 和 `pm_tiny_allowed_gids` 是完整控制权限：被允许身份可以执行
+所有 CLI 命令，包括动态创建 root 程序、保存或重载配置及退出 daemon。默认空列表只允许 daemon
+自身 UID，生产配置只能加入完全可信的身份。SDK 与 CLI 共用该入口；受管应用 UID 一旦加入也会取得
+全部控制权限，不能把 ready/tick 的进程树校验误当作其他控制命令的权限隔离。
+
 daemon 会把最终公共值导出到自身环境。Windows 与 Linux/Android 都会向被管理进程注入
 `PM_TINY_APP_NAME`、`PM_TINY_HOME` 和本平台 IPC 地址。程序配置和动态 `--env` 禁止覆盖
 `PM_TINY_*` 保留变量。
+
+Linux/Android 动态启动省略 `--user` 时，daemon 从连接的 `SO_PEERCRED` UID 得到默认账户。显式切换
+到其他 UID/GID 时会移除继承的 `PATH`、`SUDO_*` 和 `LD_*`，按目标账户重建身份环境，再应用
+`--env` 显式覆盖；executable 必须使用绝对路径或包含 `/` 的相对路径。PM_Tiny 不提供 sudo 密码输入。
 
 三平台 daemon 使用同一个日志实现和相同文本格式：
 
@@ -66,6 +75,10 @@ daemon 会把最终公共值导出到自身环境。Windows 与 Linux/Android �
 写入失败时会退回控制台并继续运行，避免日志介质故障直接阻止进程监督。
 
 ## YAML 与路径
+
+daemon 配置和程序配置单文件最大 4 MiB，程序配置最多包含 4096 项。超过边界会在 YAML 解析前或
+依赖图构建前明确失败，避免异常配置造成无界内存占用。Linux/Android 同时最多接受 256 个控制 session。
+Unix socket 地址必须放入平台 `sockaddr_un.sun_path`；文件路径和 abstract 名称超长时 daemon 直接拒绝启动。
 
 公共 daemon 字段为：
 

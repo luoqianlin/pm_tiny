@@ -168,6 +168,10 @@ int process_tree_controller::signal(const process_tree_handle &handle, int signo
     return backend_ ? backend_->signal(handle, signo) : 0;
 }
 
+bool process_tree_controller::contains(const process_tree_handle &handle, pid_t pid) const {
+    return backend_ && backend_->contains(handle, pid);
+}
+
 bool process_tree_controller::empty(const process_tree_handle &handle) const {
     return !backend_ || backend_->empty(handle);
 }

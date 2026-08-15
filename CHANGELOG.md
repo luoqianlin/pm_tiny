@@ -2,6 +2,22 @@
 
 All notable changes to PM_Tiny are documented in this file.
 
+## [4.0.0] - 2026-08-15
+
+### Added
+
+- SDK 4 with shared C/C++ interfaces, persistent transport workers, reconnect backoff, and explicit `flush` support.
+- Structured daemon inspection, bounded control sessions, stronger IPC path validation, and lifecycle/resource cleanup.
+- Cross-user Linux/Android dynamic starts with peer-credential identity resolution and controlled launch environments.
+
+### Changed
+
+- Daemon shutdown, process generations, and Windows named-pipe handling are hardened against stale events and resource leaks.
+- Dynamic `pm start` no longer relies on interactive `sudo`; root `pm_tiny` performs explicit identity switching.
+- Cross-user launches require a path-qualified executable and remove inherited `PATH`, `SUDO_*`, and `LD_*` values before applying explicit `--env` overrides.
+
+[4.0.0]: https://github.com/luoqianlin/pm_tiny/compare/v3.2.0...v4.0.0
+
 ## [3.2.0] - 2026-08-14
 
 ### Added

@@ -96,6 +96,7 @@ int main() {
     std::string reason;
     if (!backend.attach(42, handle, reason) || !handle.active) return 1;
     fs->groups[handle.cgroup_path + "/child"] = {43, 44};
+    if (!backend.contains(handle, 42) || !backend.contains(handle, 44) || backend.contains(handle, 99)) return 21;
     if (backend.empty(handle)) return 2;
     if (backend.signal(handle, SIGTERM) != 0 || fs->signals.size() != 3) return 3;
     if (backend.signal(handle, SIGKILL) != 0 || !backend.empty(handle)) return 4;
@@ -113,6 +114,7 @@ int main() {
     pm_tiny::process_tree_handle unreadable;
     if (!backend.attach(66, unreadable, reason)) return 8;
     fs->fail_collect = true;
+    if (backend.contains(unreadable, 66)) return 22;
     if (backend.empty(unreadable)) return 9;
     errno = 0;
     if (backend.signal(unreadable, SIGTERM) != -1 || errno != EIO) return 10;

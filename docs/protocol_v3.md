@@ -7,6 +7,8 @@ Linux 版 `pm`、Android 版 `pm2`、`pm_tiny` 和 `pm_sdk` 使用 Unix Domain `
 Linux daemon 使用 standalone Asio 调度 UDS、客户端 session 和子进程输出管道；CLI 日志等待和 Linux/Windows SDK 也复用 Asio 传输。协议编解码仍由 `protocol_v3` 独立完成，因此传输层不依赖一次读取对应一帧。
 
 socket 地址由 `PM_TINY_SOCK_FILE` 或 `pm_tiny.yaml` 配置；`PM_TINY_UDS_ABSTRACT_NAMESPACE=1` 时使用 Linux abstract namespace。
+daemon 同时最多保留 256 个控制 session；达到上限的新连接会立即关闭。文件系统 UDS 路径和 abstract
+名称在 bind 前按 `sockaddr_un.sun_path` 的实际容量校验，超长配置不会被静默截断。
 
 ## 帧格式
 
@@ -217,6 +219,17 @@ daemon 启动子进程时注入 `PM_TINY_APP_NAME`、`PM_TINY_SOCK_FILE` 和 `PM
 Linux/Android daemon 在 accept 后使用 `SO_PEERCRED` 验证本地调用方。daemon 自身有效 UID 始终允许，
 其他身份必须列入 `pm_tiny_allowed_uids` 或 `pm_tiny_allowed_gids`；该校验同时适用于文件 socket 和
 abstract socket。abstract socket 不具备文件权限边界，不能用 socket 路径权限替代 peer credential。
+allowlist 是完整控制权限而不是只读权限：其中的调用方可以动态创建定义、指定 `--user root`、保存、
+reload、删除定义或退出 daemon，因此只能加入完全可信的身份。
+SDK 与 CLI 共用该入口；应用 UID 一旦进入 allowlist，也可以发送其他控制命令。
+对于 ready/tick，身份 allowlist 只是连接前置条件：peer PID 还必须属于该应用当前 generation 的 cgroup
+或进程组。无法确认成员关系、旧 generation、同 UID 的无关进程及伪造应用名称都会被拒绝并关闭连接。
+
+SDK 4.0 在 Linux、Android 和 Windows 使用相同状态机：每个启用客户端创建一个 worker，ready/tick
+各占一个固定合并槽，连接在发送之间持久复用。连接或发送失败后保留 pending，从 200 ms 开始指数
+退避，最大 5 秒，IPC 稍后恢复时自动重连。析构或 close 会丢弃 pending、取消平台 I/O 并结束线程；
+需要可靠退出时由调用方显式执行 `flush(timeout)`。发送成功只表示帧已写入 IPC，不代表 daemon 已处理。
+公共接口及 C ABI 见 [sdk_4.md](sdk_4.md)。
 
 ## 错误处理
 

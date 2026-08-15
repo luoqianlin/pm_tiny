@@ -13,5 +13,5 @@ cmake -S "${PROJECT_ROOT}" -B "${BUILD_DIR}" \
     -DANDROID_STL=c++_static \
     -DPM_TINY_BUILD_TESTS=OFF \
     -DPM_TINY_SANITIZER_ENABLE=OFF
-cmake --build "${BUILD_DIR}" --target pm_tiny pm pm_sdk --parallel
+cmake --build "${BUILD_DIR}" --target pm_tiny pm pm_sdk pm_sdk_ready_tick_probe --parallel
 cmake --install "${BUILD_DIR}"

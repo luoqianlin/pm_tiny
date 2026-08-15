@@ -1,3 +1,6 @@
+//
+// Created by qianlinluo@foxmail.com on 2022/6/27.
+//
 
 #include "prog.h"
 #include "daemon_log.h"
@@ -55,10 +58,7 @@ namespace pm_tiny {
         msg_content += log_proc_exit_status(this, prog_pid, last_wstatus);
         msg_content += "\n";
         this->write_msg_to_sessions(msg_type, msg_content);
-        for (auto &session: this->sessions) {
-            session->mark_close();
-        }
-        this->sessions.clear();
+        detach_sessions();
     }
 
     /**
@@ -368,6 +368,7 @@ namespace pm_tiny {
 
     void prog_info_t::detach_sessions() {
         for (auto session: this->sessions) {
+            session->mark_close();
             session->set_prog(nullptr);
         }
         this->sessions.clear();

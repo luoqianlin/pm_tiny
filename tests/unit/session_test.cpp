@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
@@ -92,6 +93,18 @@ void test_nonblocking_empty_read_keeps_session_open() {
     expect(session.is_close(), "nonblocking session should close after peer disconnects");
 }
 
+void test_destructor_closes_owned_fd() {
+    auto sv = make_socket_pair();
+    const int owned_fd = sv[0];
+    {
+        pm_tiny::session_t session(owned_fd, 0);
+    }
+    errno = 0;
+    expect(::fcntl(owned_fd, F_GETFD) == -1 && errno == EBADF,
+           "session destructor should close its owned fd");
+    ::close(sv[1]);
+}
+
 } // namespace
 
 int main() {
@@ -99,5 +112,6 @@ int main() {
     test_read_frame_unescapes_payload();
     test_peer_shutdown_marks_session_closed();
     test_nonblocking_empty_read_keeps_session_open();
+    test_destructor_closes_owned_fd();
     return 0;
 }

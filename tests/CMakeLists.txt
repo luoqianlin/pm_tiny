@@ -31,6 +31,15 @@ add_executable(pm_sys_test
         ../src/core/globals.cpp)
 target_link_libraries(pm_sys_test pm_tiny_logging)
 
+add_executable(launch_environment_test
+        unit/launch_environment_test.cpp
+        ../src/daemon/launch_environment.cpp)
+
+add_executable(posix_privilege_wrapper_test
+        unit/posix_privilege_wrapper_test.cpp
+        ../src/cli/posix_privilege_wrapper.cpp)
+target_include_directories(posix_privilege_wrapper_test PRIVATE ../src/cli)
+
 add_executable(session_test
         unit/session_test.cpp
         ../src/core/session.cpp
@@ -61,6 +70,17 @@ add_executable(persistence_worker_test
 
 add_executable(sdk_heartbeat_fixture fixtures/sdk_heartbeat_fixture.cpp)
 target_link_libraries(sdk_heartbeat_fixture pm_sdk)
+
+add_executable(sdk_client_test unit/sdk_client_test.cpp)
+target_link_libraries(sdk_client_test pm_sdk pm_tiny_protocol)
+add_test(NAME sdk_client_test COMMAND sdk_client_test)
+set_tests_properties(sdk_client_test PROPERTIES TIMEOUT 60 LABELS "unit;sdk")
+
+add_executable(sdk_c_header_test unit/sdk_c_header_test.c)
+set_target_properties(sdk_c_header_test PROPERTIES LINKER_LANGUAGE CXX)
+target_link_libraries(sdk_c_header_test pm_sdk)
+add_test(NAME sdk_c_header_test COMMAND sdk_c_header_test)
+set_tests_properties(sdk_c_header_test PROPERTIES LABELS "unit;sdk;c-api")
 
 add_executable(frame_stream_test unit/frame_stream_test.cpp)
 add_executable(protocol_v3_test unit/protocol_v3_test.cpp)
@@ -131,6 +151,8 @@ set(PM_TINY_AUTOMATED_TESTS
         daemon_config_test
         pm_tiny_utility_test
         pm_sys_test
+        launch_environment_test
+        posix_privilege_wrapper_test
         session_test
         prog_cfg_test
         persistence_worker_test
@@ -166,8 +188,13 @@ endforeach()
 
 add_test(NAME protocol_integration
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/protocol_integration.sh)
-set_tests_properties(protocol_integration PROPERTIES
-        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}")
+if (PM_TINY_SANITIZER_ENABLE)
+    set_tests_properties(protocol_integration PROPERTIES
+            ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR};PM_TINY_TEST_SANITIZED=1")
+else ()
+    set_tests_properties(protocol_integration PROPERTIES
+            ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}")
+endif ()
 add_test(NAME cli_signal_integration
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/cli_signal_integration.py
         $<TARGET_FILE:pm>)
@@ -211,3 +238,9 @@ set_tests_properties(dependency_integration PROPERTIES
         ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
         TIMEOUT 30
         LABELS "integration;linux;dependency")
+add_test(NAME privilege_drop_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/privilege_drop_integration.sh)
+set_tests_properties(privilege_drop_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 30
+        LABELS "integration;linux;privilege")

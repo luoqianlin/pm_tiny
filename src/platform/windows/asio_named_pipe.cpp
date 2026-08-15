@@ -80,23 +80,23 @@ void AsyncNamedPipeSession::send(protocol_message message) {
     impl_->last_activity_ms = GetTickCount64();
     if (impl_->writing) return;
     impl_->writing = true;
-    auto write_next = std::make_shared<std::function<void()> >();
+    write_next();
+}
+
+void AsyncNamedPipeSession::write_next() {
+    if (impl_->closed || impl_->writes.empty()) {
+        impl_->writing = false;
+        if (impl_->finish_after_writes) close();
+        return;
+    }
     auto self = shared_from_this();
-    *write_next = [self, write_next]() {
-        if (self->impl_->closed || self->impl_->writes.empty()) {
-            self->impl_->writing = false;
-            if (self->impl_->finish_after_writes) self->close();
-            return;
-        }
-        asio::async_write(self->impl_->stream, asio::buffer(self->impl_->writes.front()),
-            [self, write_next](const asio::error_code &error, std::size_t) {
-                if (error) { self->close(); return; }
-                self->impl_->queued_bytes -= self->impl_->writes.front().size();
-                self->impl_->writes.pop_front();
-                (*write_next)();
-            });
-    };
-    (*write_next)();
+    asio::async_write(impl_->stream, asio::buffer(impl_->writes.front()),
+        [self](const asio::error_code &error, std::size_t) {
+            if (error) { self->close(); return; }
+            self->impl_->queued_bytes -= self->impl_->writes.front().size();
+            self->impl_->writes.pop_front();
+            self->write_next();
+        });
 }
 
 std::size_t AsyncNamedPipeSession::queued_bytes() const { return impl_->queued_bytes; }

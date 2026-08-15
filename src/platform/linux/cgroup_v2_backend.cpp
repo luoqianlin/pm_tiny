@@ -3,6 +3,7 @@
 #include <signal.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <vector>
 
 namespace pm_tiny {
@@ -45,6 +46,14 @@ int cgroup_v2_backend::signal(const process_tree_handle &handle, int signo) cons
     }
     if (saved_error != 0) errno = saved_error;
     return rc;
+}
+
+bool cgroup_v2_backend::contains(const process_tree_handle &handle, pid_t pid) const {
+    if (!handle.active || pid <= 0) return false;
+    std::vector<pid_t> pids;
+    std::string reason;
+    if (!fs_->collect_pids(handle.cgroup_path, pids, reason)) return false;
+    return std::find(pids.begin(), pids.end(), pid) != pids.end();
 }
 
 bool cgroup_v2_backend::empty(const process_tree_handle &handle) const {

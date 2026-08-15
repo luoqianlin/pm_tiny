@@ -1,4 +1,8 @@
+//
+// Created by luo on 2021/10/6.
+//
 #include "cli_command.h"
+#include "posix_privilege_wrapper.h"
 #include "connection_error.h"
 #include "pm_funcs.h"
 #include "pm_sys.h"
@@ -11,7 +15,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <pwd.h>
 #include <signal.h>
 #include <string>
 #include <sys/socket.h>
@@ -107,6 +110,13 @@ int main(int argc, char *argv[]) {
         std::fputs(pm_tiny::cli::command_usage(argc > 0 ? argv[0] : "pm", true).c_str(), stdout);
         return EXIT_SUCCESS;
     }
+    if (command.kind == pm_tiny::cli::command_kind::start && command.start.create &&
+        pm_tiny::cli::is_privilege_wrapper_executable(command.start.executable)) {
+        std::fprintf(stderr,
+                     "pm: warning: interactive privilege elevation is unsupported; "
+                     "run pm_tiny as root and use --user instead of `%s`\n",
+                     command.start.executable.c_str());
+    }
 
     configure_signals();
     auto session = connect_to_daemon();
@@ -150,9 +160,6 @@ int main(int argc, char *argv[]) {
                 config.args = command.start.args;
                 config.kill_timeout_s = command.start.kill_timeout_sec;
                 config.run_as = command.start.run_as;
-                if (config.run_as.empty()) {
-                    if (const auto *password = getpwuid(getuid())) config.run_as = password->pw_name;
-                }
                 config.env_vars = command.start.env;
                 config.depends_on = command.start.depends_on;
                 config.start_timeout = command.start.start_timeout;

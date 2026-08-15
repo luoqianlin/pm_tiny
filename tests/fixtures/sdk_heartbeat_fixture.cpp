@@ -1,8 +1,10 @@
+//
+// Created by qianlinluo@foxmail.com on 23-6-21.
+//
 #include <chrono>
 #include <unistd.h>
 #include <iostream>
-#include "core/time_util.h"
-#include "../sdk/AppClient.h"
+#include "pm_tiny_sdk.hpp"
 
 int main(int argc, char *argv[]) {
     (void)argc;
@@ -15,15 +17,13 @@ int main(int argc, char *argv[]) {
     auto cost = end - start;
     auto res = std::chrono::duration_cast<std::chrono::duration<double, std::ratio<60>>>(cost);
     std::cout << "cost:" << res.count() << "min" << std::endl;
-    pm_tiny::AppClient appclient;
-    if (appclient.is_enable()) {
-        std::cout << "APP Name:" << appclient.get_app_name() << std::endl;
+    pm_tiny::client appclient;
+    if (appclient.status().enabled) {
+        std::cout << "APP Name:" << appclient.status().app_name << std::endl;
     } else {
         std::cout << "App is not managed by PM_Tiny" << std::endl;
     }
-    TIME_THIS(
-            appclient.ready()
-    )
+    appclient.ready();
 
     for (int i = 0; i < 30; i++) {
         if (i < 25) {
@@ -31,7 +31,8 @@ int main(int argc, char *argv[]) {
         } else {
             sleep(11);
         }
-        TIME_THIS(appclient.tick())
+        appclient.tick();
     }
+    if (!appclient.flush(std::chrono::seconds(2))) return 3;
     return 0;
 }
