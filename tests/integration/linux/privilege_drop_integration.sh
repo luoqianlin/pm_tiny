@@ -153,7 +153,7 @@ done
 stage "explicit nobody identity"
 probe="id -u > '$TMP/identity'; id -g >> '$TMP/identity'; id -G >> '$TMP/identity'; sleep 1"
 sudo -n env PM_TINY_HOME="$TMP/home" PM_TINY_SOCK_FILE="$TMP/pm.sock" \
-    PM_TINY_UDS_ABSTRACT_NAMESPACE=0 "$BIN/pm" start identity_probe --no-daemon --no-pty \
+    PM_TINY_UDS_ABSTRACT_NAMESPACE=0 "$BIN/pm" start identity_probe --cwd "$TMP" --no-daemon --no-pty \
     --user nobody -- /bin/sh -c "$probe" >/dev/null
 for _ in $(seq 1 100); do
     [[ -s "$TMP/identity" ]] && [[ $(wc -l < "$TMP/identity") -ge 3 ]] && break
