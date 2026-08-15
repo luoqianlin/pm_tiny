@@ -52,6 +52,7 @@ if (WIN32)
 endif ()
 
 include(FetchContent)
+find_package(Threads REQUIRED)
 
 set(YAML_CPP_LOCAL_DIR "${CMAKE_SOURCE_DIR}/dependencies/yaml-cpp")
 if (EXISTS "${YAML_CPP_LOCAL_DIR}/CMakeLists.txt")
@@ -231,6 +232,7 @@ if (PM_TINY_ON_WINDOWS)
             PRIVATE yaml-cpp pm_tiny_asio pm_tiny_dependency_graph pm_tiny_program_name pm_tiny_lifecycle
             pm_tiny_protocol pm_tiny_runtime pm_tiny_logging
             pm_tiny_daemon_config
+            Threads::Threads
             ws2_32 advapi32 psapi shell32)
 else ()
     add_executable(pm_tiny
@@ -289,6 +291,7 @@ else ()
             PRIVATE yaml-cpp pm_tiny_asio pm_tiny_dependency_graph pm_tiny_program_name pm_tiny_lifecycle
             pm_tiny_protocol pm_tiny_runtime pm_tiny_logging
             pm_tiny_daemon_config
+            Threads::Threads
     )
 
     if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
@@ -317,7 +320,7 @@ if (PM_TINY_ON_WINDOWS)
             ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows)
     target_compile_definitions(pm PRIVATE PM_TINY_VERSION="${PROJECT_VERSION}" WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(pm PRIVATE pm_tiny_cli_output pm_tiny_cli_command pm_tiny_protocol pm_tiny_runtime
-            pm_tiny_daemon_config)
+            pm_tiny_daemon_config Threads::Threads)
     target_link_libraries(pm PRIVATE pm_tiny_cli_connection_error)
     if (PM_TINY_BUILD_TESTS)
         add_executable(windows_process_tree_fixture tests/fixtures/windows_process_tree_fixture.cpp)
@@ -387,6 +390,7 @@ else ()
             pm
             PRIVATE yaml-cpp pm_tiny_asio pm_tiny_cli_output pm_tiny_cli_connection_error pm_tiny_cli_command
             pm_tiny_protocol pm_tiny_runtime pm_tiny_daemon_config pm_tiny_logging
+            Threads::Threads
     )
 endif ()
 
