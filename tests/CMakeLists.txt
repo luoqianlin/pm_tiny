@@ -67,6 +67,7 @@ add_executable(memory_util_test
 add_executable(persistence_worker_test
         unit/persistence_worker_test.cpp
         ../src/core/persistence_worker.cpp)
+target_link_libraries(persistence_worker_test Threads::Threads)
 
 add_executable(sdk_heartbeat_fixture fixtures/sdk_heartbeat_fixture.cpp)
 target_link_libraries(sdk_heartbeat_fixture pm_sdk)
@@ -88,7 +89,7 @@ target_link_libraries(protocol_v3_test pm_tiny_protocol)
 add_executable(program_log_test unit/program_log_test.cpp)
 target_link_libraries(program_log_test pm_tiny_logging)
 add_executable(daemon_log_test unit/daemon_log_test.cpp)
-target_link_libraries(daemon_log_test pm_tiny_logging)
+target_link_libraries(daemon_log_test pm_tiny_logging Threads::Threads)
 add_executable(daemon_info_test unit/daemon_info_test.cpp)
 target_link_libraries(daemon_info_test pm_tiny_cli_output)
 add_executable(process_list_test unit/process_list_test.cpp)
