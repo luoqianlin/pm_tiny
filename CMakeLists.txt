@@ -58,7 +58,7 @@ set(YAML_CPP_LOCAL_DIR "${CMAKE_SOURCE_DIR}/dependencies/yaml-cpp")
 if (EXISTS "${YAML_CPP_LOCAL_DIR}/CMakeLists.txt")
     message(STATUS "Using bundled yaml-cpp from ${YAML_CPP_LOCAL_DIR}")
     add_subdirectory("${YAML_CPP_LOCAL_DIR}"
-            "${CMAKE_BINARY_DIR}/_deps/yaml-cpp-build")
+            "${CMAKE_BINARY_DIR}/_deps/yaml-cpp-build" EXCLUDE_FROM_ALL)
 else ()
     FetchContent_Declare(yaml-cpp
             GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
