@@ -56,18 +56,16 @@ include(FetchContent)
 set(YAML_CPP_LOCAL_DIR "${CMAKE_SOURCE_DIR}/dependencies/yaml-cpp")
 if (EXISTS "${YAML_CPP_LOCAL_DIR}/CMakeLists.txt")
     message(STATUS "Using bundled yaml-cpp from ${YAML_CPP_LOCAL_DIR}")
-    FetchContent_Declare(yaml-cpp
-            SOURCE_DIR ${YAML_CPP_LOCAL_DIR}
-    )
+    add_subdirectory("${YAML_CPP_LOCAL_DIR}"
+            "${CMAKE_BINARY_DIR}/_deps/yaml-cpp-build")
 else ()
     FetchContent_Declare(yaml-cpp
             GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
             GIT_TAG yaml-cpp-0.7.0
             DOWNLOAD_DIR ${CMAKE_HOME_DIRECTORY}/dependencies
     )
+    FetchContent_MakeAvailable(yaml-cpp)
 endif ()
-
-FetchContent_MakeAvailable(yaml-cpp)
 
 set(ASIO_LOCAL_DIR "${CMAKE_SOURCE_DIR}/dependencies/asio")
 if (NOT EXISTS "${ASIO_LOCAL_DIR}/asio.hpp" OR
