@@ -4,6 +4,8 @@
 - 控制管道已启用，可通过 pm list|start|stop|quit 与守护进程交互。
 - `pm list` 与 Linux/Android 共用结构化列表协议、runtime snapshot 和渲染器，支持自适应表格、`--wide`、`--json` 与 `--no-color`；Windows 的 PTY 字段显示为不支持。
 - `pm inspect` 与 Linux/Android 使用同一二进制 schema 和 CLI renderer，不再返回 Windows 特有的文本键值响应；平台差异通过 `pty`、`process_tree_backend` 和 capability 字段表达。
+- `pm info` 的 `capabilities.failure_action: true` 表示平台支持至少一种非默认 failure action；Windows
+  当前支持 `restart`，但仍会在 CLI 和 daemon 两端拒绝 `reboot`。
 - `pm info [--json]` 与 Linux/Android 使用同一 daemon-info schema，报告前台或 SCM `service` 模式、named pipe/SDDL、Job Object、日志 sink、最终配置来源和 Windows 能力差异。
 - `pm graph` 与 Linux/Android 共用客户端依赖图渲染器，支持全图/聚焦子图、文本、JSON、DOT 和状态颜色，不新增命名管道协议命令。
 - 支持在运行时动态 start/stop 配置中定义的进程，停止后守护进程保持待命。
@@ -60,7 +62,7 @@
 | PTY | 支持 `pty: true` | 尚不支持，返回 `unsupported` | Windows 配置和动态 start 明确拒绝 `pty: true` |
 | 指定运行用户 | 支持非空 `user` | 尚不支持 | Windows 明确拒绝，不静默使用 daemon 身份启动 |
 | OOM 调整 | 支持 `oom_score_adj` | 仅接受默认值 0 | 这是 Linux/Android 内核能力；后续资源限制应分别映射到 cgroup 和 Job Object |
-| failure action | 支持 `skip/restart/reboot` | 当前仅支持 `skip` | Windows 明确拒绝其他值；跨平台 `reboot` 需先定义权限和失败语义 |
+| failure action | 支持 `skip/restart/reboot` | 支持 `skip/restart` | Windows 明确拒绝 `reboot`；超时重启等待完整 Job Object 清空并复用统一退避策略 |
 | 最后退出原因 | 区分正常退出与 signal，并返回退出码或信号编号 | 返回正常退出及 Windows exit code | 字段相同，但不在 Windows 伪造 POSIX signal |
 | 系统服务集成 | Ubuntu systemd 安装脚本 | Windows SCM 安装、状态和卸载脚本 | 服务管理保持平台原生实现 |
 | 发布与升级 | 版本目录、原子 `current` 链接和 journal 回滚 | 版本目录、`current.release`、SCM BinaryPath journal 回滚 | manifest/SHA-256、隔离健康检查和失败恢复语义一致 |
@@ -71,7 +73,8 @@
 
 ## 当前限制
 
-- `user`、非零 `oom_score_adj`、`pty: true` 和非 `skip` 的 `failure_action` 尚不支持，配置加载时会明确拒绝。
+- `user`、非零 `oom_score_adj`、`pty: true` 和 `failure_action: reboot` 尚不支持，配置加载时会明确拒绝；
+  `failure_action: restart` 已同时支持启动超时和心跳超时。
 - Windows 服务或 SSH 会话通常没有与被管理进程共享的控制台，CTRL_BREAK 不可用时会降级为 Job Object 强杀。
 - 已提供 MSVC 二进制版本目录、manifest 校验、隔离预检、SCM BinaryPath 切换及自动回滚脚本；标准安装包格式仍未确定。
 - Linux/Android 与 Windows 已共享 CLI 命令定义、公共配置字段及 YAML 序列化、依赖校验、控制命令、重启策略、runtime snapshot、inspect/list 二进制 schema、终止状态机和部分控制操作完成判定；平台事件循环、进程创建、IPC 和终止系统调用仍分别实现，需要继续收敛契约而不强行抽象平台后端。
