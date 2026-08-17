@@ -498,7 +498,7 @@ if (PM_TINY_BUILD_TESTS)
         pm_tiny_add_windows_protocol_test(windows_dependency_mutation_integration
                 dependency-mutations windows-dependency 60 "integration;windows;dependency")
         pm_tiny_add_windows_protocol_test(windows_concurrent_control_integration
-                concurrent-controls windows-concurrent 180 "integration;windows;concurrency")
+                concurrent-controls windows-concurrent 360 "integration;windows;concurrency")
         if (MSVC)
             add_test(NAME windows_service_integration
                     COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass

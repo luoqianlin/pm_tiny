@@ -127,7 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Android NDK
-        run: sdkmanager "ndk;25.1.8937393"
+        run: '"$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;25.1.8937393"'
       - name: Build Android Release inputs
         env:
           PM_TINY_ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/25.1.8937393
