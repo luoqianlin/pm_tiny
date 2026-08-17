@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+EXPECTED_VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
 BIN="${PM_TINY_TEST_BIN:-$ROOT/build}"
 TMP="$(mktemp -d /tmp/pm_tiny_protocol.XXXXXX)"
 cleanup() {
@@ -186,7 +187,7 @@ PY
 fi
 wait_for_control_recovery
 
-"$BIN/pm" --version | grep -q 'pm_tiny: 4.1.0'
+"$BIN/pm" --version | grep -qF "pm_tiny: $EXPECTED_VERSION"
 "$BIN/pm" ls | grep -q 'Total: 0'
 "$BIN/pm" ls --json | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data == {"schema_version": 5, "total": 0, "processes": []}'
 mkdir -p "$TMP/yaml-cwd"

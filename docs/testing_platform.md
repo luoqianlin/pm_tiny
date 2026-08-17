@@ -89,6 +89,22 @@ Linux 通过同目录临时链接和 `rename` 原子替换 `current`。Windows �
 CTest 的 Linux/Windows release transaction 场景全部使用临时根、唯一 IPC 和唯一服务名，并注入
 切换前失败、切换后失败和中断恢复，不访问 `/usr/local`、默认 pipe/socket 或生产 `pm_tiny` 服务。
 
+## 可复现发布归档
+
+正式归档从干净的公开提交构建。版本唯一来源为仓库根目录的 `VERSION`；三个受控平台分别运行
+`build-linux-release.sh`、`build-android-release.sh` 和 `build-windows-release.ps1`。打包示例：
+
+```bash
+python3 scripts/release/package_release.py package \
+  --platform linux-x86_64 --binary-dir build/release-bin --output-dir build/release-assets \
+  --source-commit "$(git rev-parse HEAD)" --toolchain "Ubuntu 20.04 / GCC 9.4.0"
+```
+
+每个归档包含 `RELEASE-METADATA.json`，记录公开源码 SHA、工具链、平台契约和内部文件哈希，不记录
+构建主机、工作目录或设备序列号。完成三个平台打包后依次运行 `checksums` 和 `verify`；验证会拒绝
+额外资产、错误架构、Android 动态 libc++、Windows `pm2.exe` 以及超过策略上限的 Linux ABI。
+归档成员顺序、时间戳、权限和所有者字段规范化，因此相同输入应生成相同归档哈希。
+
 ## CI 与设备边界
 
 `build.yml` 对每次 push/PR 运行 Linux、sanitizer、真实 cgroup、coverage、两套 30 秒 fuzz smoke、

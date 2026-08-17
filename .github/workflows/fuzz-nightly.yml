@@ -8,6 +8,7 @@ on:
 jobs:
   libfuzzer:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Run nightly libFuzzer targets
@@ -27,6 +28,7 @@ jobs:
 
   afl:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install AFL++

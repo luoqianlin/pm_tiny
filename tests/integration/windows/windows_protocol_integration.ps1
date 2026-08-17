@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$script:ExpectedVersion = (Get-Content -LiteralPath (Join-Path $SourceDir "VERSION") -Raw).Trim()
 $script:Utf8Encoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $script:Utf8Encoding
 [Console]::OutputEncoding = $script:Utf8Encoding
@@ -121,7 +122,7 @@ function Start-TestDaemon([string]$Scenario, [string]$ConfigPath, [bool]$UseDefa
     $script:DaemonProcess = Start-Process -FilePath $Daemon -ArgumentList @("--config", $quotedConfigPath) `
         -WorkingDirectory $ArtifactsDir -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Wait-For {
-        try { (Invoke-Pm @("version")).Contains("pm_tiny: 4.1.0") } catch { $false }
+        try { (Invoke-Pm @("version")).Contains("pm_tiny: $script:ExpectedVersion") } catch { $false }
     } 10 "$Scenario daemon control pipe"
 }
 
@@ -233,7 +234,7 @@ function Run-ConnectionFailureScenario {
     $configuredPipe = $env:PM_TINY_PIPE_NAME
     try {
         $env:PM_TINY_PIPE_NAME = $null
-        Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "pipe discovery through PM_TINY_HOME"
+        Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "pipe discovery through PM_TINY_HOME"
     } finally {
         $env:PM_TINY_PIPE_NAME = $configuredPipe
     }
@@ -276,7 +277,7 @@ function Run-MainProtocolScenario {
     Start-TestDaemon "main" $config
     Write-Host "[windows-integration] main commands"
 
-    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "version"
+    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "version"
     $daemonInfo = Invoke-Pm @("info", "--json") | ConvertFrom-Json
     if ($daemonInfo.schema_version -ne 1 -or $daemonInfo.identity.platform -ne "windows") {
         throw "daemon info identity/schema mismatch"
@@ -321,7 +322,7 @@ function Run-MainProtocolScenario {
     foreach ($mode in @("fragmented", "coalesced", "unknown-type", "invalid-magic", "invalid-version", "invalid-flags", "oversize", "slow")) {
         & $ProtocolProbe $mode
         if ($LASTEXITCODE -ne 0) { throw "protocol probe failed: $mode" }
-        Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "daemon recovery after $mode"
+        Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "daemon recovery after $mode"
     }
     Stop-TestDaemon
 }
@@ -738,7 +739,7 @@ function Run-ConcurrentControlScenario {
         $wave += Start-ConcurrentPm "wave1-reload-$index" @("reload", "--no-list")
     }
     Wait-ConcurrentPm $wave "wave1"
-    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "daemon after concurrent read/persistence wave"
+    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "daemon after concurrent read/persistence wave"
 
     $wave = @()
     for ($index = 1; $index -le 4; $index++) {
@@ -754,7 +755,7 @@ function Run-ConcurrentControlScenario {
     if ($status.schema_version -ne 5 -or $null -eq $status.processes) {
         throw "daemon returned invalid process list after concurrent control wave"
     }
-    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "daemon after concurrent lifecycle wave"
+    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "daemon after concurrent lifecycle wave"
     Stop-TestDaemon
 }
 
@@ -957,7 +958,7 @@ function Run-ProcessTreeCase([string]$Mode, [int]$KillTimeout) {
     $started = [DateTime]::UtcNow
     Assert-Contains (Invoke-Pm @("stop", "tree_fixture")) "tree_fixture" "$Mode stop list"
     $versionStarted = [DateTime]::UtcNow
-    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "$Mode version during termination"
+    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "$Mode version during termination"
     if (([DateTime]::UtcNow - $versionStarted).TotalSeconds -gt 1.0) {
         throw "$Mode version was blocked by termination"
     }
@@ -1206,12 +1207,12 @@ function Run-LogClientIsolationScenario {
         "-NoProfile", "-Command", $command)) 'started `flood` pid=' "log flood start"
     & $ProtocolProbe "slow-log" "flood"
     if ($LASTEXITCODE -ne 0) { throw "slow log client was not isolated" }
-    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "daemon after slow log client"
+    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "daemon after slow log client"
     Wait-For-State "flood" "online" 5 "flood remains online after slow client disconnect"
 
     & $ProtocolProbe "interrupt-cli" $Cli "flood"
     if ($LASTEXITCODE -ne 0) { throw "pm log Ctrl+C did not return 130" }
-    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: 4.1.0" "daemon after log Ctrl+C"
+    Assert-Contains (Invoke-Pm @("version")) "pm_tiny: $script:ExpectedVersion" "daemon after log Ctrl+C"
     Wait-For-State "flood" "online" 5 "flood remains online after log Ctrl+C"
     Assert-Contains (Invoke-Pm @("stop", "flood")) "flood" "stop log flood list"
     Wait-For-State "flood" "stopped" 10 "log flood stopped state"

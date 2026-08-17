@@ -18,7 +18,7 @@ PM_Tiny 按运行时代码、平台实现、测试职责和部署资产分离目
 | `examples/config` | 可复制修改的 Linux 和 Windows 配置样例 |
 | `scripts/build` | 明确标注目标平台的构建入口 |
 | `scripts/install` | 系统安装脚本 |
-| `scripts/release` | release manifest 与 Linux/Windows 原子升级回滚事务 |
+| `scripts/release` | 受控平台构建、确定性归档、release manifest 与原子升级回滚事务 |
 | `scripts/test` | LLVM coverage 和 libFuzzer/AFL++ 专项测试入口 |
 | `scripts/windows` | Windows SCM 管理脚本 |
 | `packaging/systemd` | systemd 单元等打包资产 |

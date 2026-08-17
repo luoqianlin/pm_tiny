@@ -2,6 +2,8 @@
 set -euo pipefail
 
 BIN=${PM_TINY_TEST_BIN:?PM_TINY_TEST_BIN is required}
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+EXPECTED_VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
 TEST_ROOT=$(mktemp -d /tmp/pm_tiny_info_integration.XXXXXX)
 FOREGROUND_PID=
 
@@ -32,13 +34,13 @@ wait_for_socket() {
 assert_info() {
     local expected_mode=$1
     PM_TINY_HOME="$TEST_ROOT" "$BIN/pm" info --json > "$TEST_ROOT/info.json"
-    python3 - "$TEST_ROOT/info.json" "$TEST_ROOT" "$expected_mode" <<'PY'
+    python3 - "$TEST_ROOT/info.json" "$TEST_ROOT" "$expected_mode" "$EXPECTED_VERSION" <<'PY'
 import json, os, sys
-path, root, mode = sys.argv[1:]
+path, root, mode, expected_version = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     data = json.load(stream)
 assert data["schema_version"] == 1
-assert data["identity"]["version"] == "4.1.0"
+assert data["identity"]["version"] == expected_version
 assert data["identity"]["protocol_version"] == 3
 assert data["identity"]["pid"] > 0
 assert data["identity"]["uptime_ms"] >= 0

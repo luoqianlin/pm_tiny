@@ -8,6 +8,7 @@ fi
 
 SERIAL=$1
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+EXPECTED_VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
 INSTALL_DIR=${2:-"$ROOT/build-android-arm64/_install/Release"}
 BIN_DIR="$INSTALL_DIR/bin"
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -44,7 +45,7 @@ start_test_daemon() {
     "${ADB[@]}" shell \
         "env PM_TINY_HOME='$HOME_DIR' PM_TINY_SOCK_FILE='$SOCKET' PM_TINY_UDS_ABSTRACT_NAMESPACE=0 PM_TINY_PROG_CFG_FILE='$PROGRAM_CONFIG' nohup '$REMOTE/pm_tiny_test' >'$REMOTE/daemon.log' 2>&1 &"
     for _ in $(seq 1 100); do
-        if remote_pm version 2>/dev/null | grep -q '4.1.0'; then return 0; fi
+        if remote_pm version 2>/dev/null | grep -q "$EXPECTED_VERSION"; then return 0; fi
         sleep .1
     done
     return 1
@@ -89,11 +90,11 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 assert data["total"] == 0 and data["processes"] == []
 PY
 remote_pm info --json | tr -d '\r' > "$ARTIFACT_DIR/missing-info.json"
-python3 - "$ARTIFACT_DIR/missing-info.json" "$SOCKET" <<'PY'
+python3 - "$ARTIFACT_DIR/missing-info.json" "$SOCKET" "$EXPECTED_VERSION" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     data = json.load(stream)
-assert data["identity"]["version"] == "4.1.0"
+assert data["identity"]["version"] == sys.argv[3]
 assert data["identity"]["platform"] == "android"
 assert data["runtime"]["file_config_count"] == 0
 assert data["runtime"]["runtime_definition_count"] == 0

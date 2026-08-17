@@ -130,7 +130,7 @@ int run_fragmented() {
         return 4;
     }
     if (!read || response.type != 0x29 || response.request_id != 0x10203040 ||
-        status != 0 || version != "4.1.0") {
+        status != 0 || version != PM_TINY_EXPECTED_VERSION) {
         return 4;
     }
     return 0;

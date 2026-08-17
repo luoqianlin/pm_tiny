@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ExpectedVersion = (Get-Content -LiteralPath (Join-Path $SourceDir "VERSION") -Raw).Trim()
 $serviceName = "pm_tiny_test_$PID"
 $pipeName = "\\.\pipe\$serviceName"
 $work = Join-Path $ArtifactsDir "service"
@@ -71,7 +72,7 @@ pm_tiny_log_archive_count: 3
     $service = Get-Service -Name $serviceName
     if ($service.Status -ne 'Running') { throw "service did not reach Running" }
     Wait-For {
-        try { (Invoke-Pm @("version")).Contains("pm_tiny: 4.1.0") } catch { $false }
+        try { (Invoke-Pm @("version")).Contains("pm_tiny: $ExpectedVersion") } catch { $false }
     } 10 "service control pipe"
     $daemonInfo = Invoke-Pm @("info", "--json") | ConvertFrom-Json
     if ($daemonInfo.runtime.mode -ne "service" -or

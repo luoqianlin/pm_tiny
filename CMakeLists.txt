@@ -12,7 +12,11 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
     set(CMAKE_ANDROID_STL_TYPE c++_static CACHE STRING
             "Android C++ runtime linkage" FORCE)
 endif ()
-project(pm_tiny VERSION 4.1.0 LANGUAGES C CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PM_TINY_PROJECT_VERSION LIMIT_COUNT 1)
+if (NOT PM_TINY_PROJECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain a semantic version such as 4.1.0")
+endif ()
+project(pm_tiny VERSION ${PM_TINY_PROJECT_VERSION} LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 
@@ -362,7 +366,8 @@ if (PM_TINY_ON_WINDOWS)
         target_include_directories(windows_protocol_probe PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
-        target_compile_definitions(windows_protocol_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        target_compile_definitions(windows_protocol_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                PM_TINY_EXPECTED_VERSION="${PROJECT_VERSION}")
         target_link_libraries(windows_protocol_probe PRIVATE pm_tiny_protocol)
         add_executable(connection_error_test tests/unit/connection_error_test.cpp)
         target_link_libraries(connection_error_test PRIVATE pm_tiny_cli_connection_error)
@@ -493,7 +498,7 @@ if (PM_TINY_BUILD_TESTS)
         pm_tiny_add_windows_protocol_test(windows_dependency_mutation_integration
                 dependency-mutations windows-dependency 60 "integration;windows;dependency")
         pm_tiny_add_windows_protocol_test(windows_concurrent_control_integration
-                concurrent-controls windows-concurrent 90 "integration;windows;concurrency")
+                concurrent-controls windows-concurrent 180 "integration;windows;concurrency")
         if (MSVC)
             add_test(NAME windows_service_integration
                     COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass

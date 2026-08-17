@@ -8,6 +8,7 @@ fi
 
 SERIAL=$1
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+EXPECTED_VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
 source "$ROOT/scripts/android_production_guard.sh"
 INSTALL_DIR=${2:-"$ROOT/.build_android/_install/Release"}
 BIN_DIR="$INSTALL_DIR/bin"
@@ -44,7 +45,7 @@ adb -s "$SERIAL" shell "chmod 755 '$REMOTE/pm_tiny' '$REMOTE/pm2_test'"
 
 adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET PM_TINY_PROG_CFG_FILE=$REMOTE/prog.yaml nohup $REMOTE/pm_tiny >$REMOTE/daemon.log 2>&1 &"
 for _ in $(seq 1 100); do
-    if adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET $REMOTE/pm2_test version" 2>/dev/null | grep -q "4.1.0"; then
+    if adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET $REMOTE/pm2_test version" 2>/dev/null | grep -q "$EXPECTED_VERSION"; then
         break
     fi
     sleep .1
@@ -52,7 +53,7 @@ done
 
 info=$(adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET $REMOTE/pm2_test info --json" | tr -d '\r')
 printf '%s\n' "$info" > "$ARTIFACT_DIR/info.json"
-python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["schema_version"] == 1; assert data["identity"]["version"] == "4.1.0"; assert data["identity"]["platform"] == "android"; assert data["identity"]["pid"] > 0; assert data["identity"]["uptime_ms"] >= 0; assert data["runtime"]["mode"] == "foreground"; assert data["runtime"]["state"] == "running"; assert data["config"]["home_dir"]["source"] == "environment"; assert data["ipc"]["uds_address"] == {"value": sys.argv[1], "source": "environment"}; assert data["capabilities"]["pty"] is True' "$SOCKET" <<< "$info"
+python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["schema_version"] == 1; assert data["identity"]["version"] == sys.argv[2]; assert data["identity"]["platform"] == "android"; assert data["identity"]["pid"] > 0; assert data["identity"]["uptime_ms"] >= 0; assert data["runtime"]["mode"] == "foreground"; assert data["runtime"]["state"] == "running"; assert data["config"]["home_dir"]["source"] == "environment"; assert data["ipc"]["uds_address"] == {"value": sys.argv[1], "source": "environment"}; assert data["capabilities"]["pty"] is True' "$SOCKET" "$EXPECTED_VERSION" <<< "$info"
 
 for _ in $(seq 1 100); do
     status=$(adb -s "$SERIAL" shell "PM_TINY_HOME=$REMOTE/home PM_TINY_SOCK_FILE=$SOCKET $REMOTE/pm2_test list --json" 2>/dev/null | tr -d '\r')

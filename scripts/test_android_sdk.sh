@@ -8,6 +8,7 @@ fi
 
 SERIAL=$1
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+EXPECTED_VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
 source "$ROOT/scripts/android_production_guard.sh"
 INSTALL_DIR=${2:-"$ROOT/build-android-arm64/_install/Release"}
 PROBE_BIN=${3:-"$ROOT/build-android-arm64/pm_sdk_ready_tick_probe"}
@@ -80,10 +81,10 @@ remote_pm() {
 }
 
 for _ in $(seq 1 80); do
-    if remote_pm version 2>/dev/null | grep -q '4.1.0'; then break; fi
+    if remote_pm version 2>/dev/null | grep -q "$EXPECTED_VERSION"; then break; fi
     sleep 0.1
 done
-remote_pm version | grep -q '4.1.0'
+remote_pm version | grep -q "$EXPECTED_VERSION"
 
 for _ in $(seq 1 50); do
     if remote_pm list --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); assert any(p["name"] == "sdk_probe" and p["state"] == "online" for p in d["processes"])' 2>/dev/null; then

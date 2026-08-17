@@ -7,6 +7,7 @@ on:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -15,6 +16,8 @@ jobs:
         run: cmake --build build -j2
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Test release packaging tools
+        run: python3 -m unittest tests/release/test_package_release.py
       - name: Upload Linux failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -26,6 +29,7 @@ jobs:
 
   linux-sanitizers:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -41,6 +45,7 @@ jobs:
 
   linux-real-cgroup:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -56,6 +61,7 @@ jobs:
 
   llvm-coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM coverage tools
@@ -75,6 +81,7 @@ jobs:
 
   libfuzzer-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Run three libFuzzer targets
@@ -94,6 +101,7 @@ jobs:
 
   afl-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install AFL++
@@ -115,37 +123,36 @@ jobs:
 
   android-arm64:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: >-
-          cmake -S . -B build-android
-          -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
-          -DANDROID_ABI=arm64-v8a
-          -DANDROID_PLATFORM=android-30
-          -DCMAKE_BUILD_TYPE=Release
-          -DPM_TINY_BUILD_TESTS=OFF
-          -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-      - name: Build
-        run: cmake --build build-android --target pm_tiny pm --parallel 2
+      - name: Install pinned Android NDK
+        run: sdkmanager "ndk;25.1.8937393"
+      - name: Build Android Release inputs
+        env:
+          PM_TINY_ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/25.1.8937393
+          PM_TINY_ANDROID_RELEASE_BUILD_DIR: ${{ github.workspace }}/build-android
+          PM_TINY_ANDROID_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/build-android/release-bin
+          PM_TINY_BUILD_JOBS: "2"
+        run: bash scripts/release/build-android-release.sh
       - name: Verify Android artifacts
         run: |
-          test -x build-android/pm_tiny
-          test -x build-android/pm2
-          test ! -e build-android/pm
-          ! "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build-android/pm_tiny | grep -F libc++_shared.so
-          ! "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build-android/pm2 | grep -F libc++_shared.so
+          test -x build-android/release-bin/pm_tiny
+          test -x build-android/release-bin/pm2
+          test ! -e build-android/release-bin/pm
 
   windows-msvc:
     runs-on: windows-2022
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-      - name: Build
-        run: cmake --build build-msvc --config Release --parallel 2
-      - name: Test
-        run: ctest --test-dir build-msvc -C Release --output-on-failure
+      - name: Build and test Windows Release inputs
+        shell: powershell
+        run: >-
+          .\scripts\release\build-windows-release.ps1
+          -SourceDir $env:GITHUB_WORKSPACE
+          -BuildDir "$env:GITHUB_WORKSPACE\build-msvc"
+          -OutputDir "$env:GITHUB_WORKSPACE\build-msvc\release-bin"
       - name: Upload Windows MSVC test artifacts
         if: failure()
         uses: actions/upload-artifact@v4
