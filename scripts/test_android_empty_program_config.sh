@@ -101,8 +101,14 @@ assert data["ipc"]["uds_address"] == {"value": sys.argv[2], "source": "environme
 PY
 
 remote_pm start empty_probe --no-daemon --no-pty -- /system/bin/sleep 60 >/dev/null
-CHILD_PID=$(remote_pm list --json | tr -d '\r' |
-    python3 -c 'import json,sys; print(json.load(sys.stdin)["processes"][0]["pid"])')
+CHILD_PID=""
+for _ in $(seq 1 100); do
+    CHILD_PID=$(remote_pm list --json | tr -d '\r' |
+        python3 -c 'import json,sys; pid=json.load(sys.stdin)["processes"][0]["pid"]; print(pid if isinstance(pid, int) else "")')
+    if [[ "$CHILD_PID" =~ ^[0-9]+$ ]]; then break; fi
+    sleep .05
+done
+[[ "$CHILD_PID" =~ ^[0-9]+$ ]]
 "${ADB[@]}" shell "test -d /proc/$CHILD_PID"
 remote_pm save >/dev/null
 "${ADB[@]}" shell "grep -q 'name: empty_probe' '$PROGRAM_CONFIG'"
