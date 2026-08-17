@@ -107,6 +107,17 @@ function Remove-TestService {
     if ($LASTEXITCODE -ne 0) { throw "failed to delete service $ServiceName" }
 }
 
+function Invoke-ClientInfo([string]$Client) {
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        $output = & $Client info --json 2>$null | Out-String
+        return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+}
+
 function Restore-Transaction($Transaction) {
     Stop-TestService
     if ($Transaction.service_existed) {
@@ -155,9 +166,9 @@ function Test-ReleaseHealth([string]$ReleaseDir, [string]$Tag) {
         $process = Start-Process -FilePath $daemon -ArgumentList $arguments -PassThru -WindowStyle Hidden
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         do {
-            $output = & $client info --json 2>$null | Out-String
-            if ($LASTEXITCODE -eq 0) {
-                $info = $output | ConvertFrom-Json
+            $result = Invoke-ClientInfo $client
+            if ($result.ExitCode -eq 0) {
+                $info = $result.Output | ConvertFrom-Json
                 if ($info.identity.protocol_version -eq 3 -and $info.runtime.state -eq "running") { return $true }
             }
             if ($process.HasExited) { break }
@@ -245,9 +256,9 @@ if ($env:PM_TINY_RELEASE_TEST_FAIL_AFTER_SWITCH -ne "1") {
         $env:PM_TINY_PIPE_NAME = $PipeName
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         do {
-            $output = & (Join-Path $Target "pm.exe") info --json 2>$null | Out-String
-            if ($LASTEXITCODE -eq 0) {
-                $info = $output | ConvertFrom-Json
+            $result = Invoke-ClientInfo (Join-Path $Target "pm.exe")
+            if ($result.ExitCode -eq 0) {
+                $info = $result.Output | ConvertFrom-Json
                 if ($info.identity.protocol_version -eq 3 -and $info.runtime.mode -eq "service") {
                     $postHealthy = $true
                     break

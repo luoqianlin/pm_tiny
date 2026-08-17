@@ -30,7 +30,7 @@ option(PM_TINY_BUILD_TESTS "Build pm_tiny tests" ON)
 if (MSVC)
     add_compile_options(/W4 /utf-8)
 else ()
-    add_compile_options(-Wall -Wextra)
+    add_compile_options(-Wall -Wextra "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
 endif ()
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "")
