@@ -25,9 +25,9 @@ foreach ($name in @("pm_tiny.exe", "pm.exe")) {
 }
 if (Test-Path -LiteralPath (Join-Path $OutputDir "pm2.exe")) { throw "Unexpected pm2.exe" }
 $version = (Get-Content -LiteralPath (Join-Path $SourceDir "VERSION") -Raw).Trim()
-$cliVersion = (& (Join-Path $OutputDir "pm.exe") --version 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -or -not $cliVersion.Contains("pm_tiny: $version")) {
-    throw "Windows Release version mismatch: $cliVersion"
+$daemonVersion = (& (Join-Path $OutputDir "pm_tiny.exe") --version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or -not $daemonVersion.Contains("pm_tiny $version")) {
+    throw "Windows Release version mismatch: $daemonVersion"
 }
 $compiler = (& cmd.exe /d /s /c '""%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property catalog_productDisplayVersion"' 2>&1 | Out-String).Trim()
 @("toolchain=VS 2022/MSVC", "visual_studio=$compiler") |

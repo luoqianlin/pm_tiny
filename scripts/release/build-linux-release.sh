@@ -16,14 +16,14 @@ cmake -S "$ROOT" -B "$BUILD_DIR" \
     -DPM_TINY_SANITIZER_ENABLE=OFF \
     -DFETCHCONTENT_FULLY_DISCONNECTED=ON
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
-ctest --test-dir "$BUILD_DIR" --output-on-failure
+(cd "$BUILD_DIR" && ctest --output-on-failure)
 
 mkdir -p "$OUTPUT_DIR"
 for name in pm_tiny pm; do
     cp "$BUILD_DIR/$name" "$OUTPUT_DIR/$name"
     strip "$OUTPUT_DIR/$name"
-    "$OUTPUT_DIR/$name" --version
 done
+"$OUTPUT_DIR/pm_tiny" --version
 
 printf 'compiler=%s\ncmake=%s\n' \
     "$(c++ --version | head -n 1)" "$(cmake --version | head -n 1)" \

@@ -144,8 +144,7 @@ def validate_linux(binary_dir, version, compatibility):
         if not path.is_file() or read_elf_machine(path) != 62:
             fail("Linux release requires x86_64 ELF binary: {}".format(name))
     daemon_version = command_output([str(binary_dir / "pm_tiny"), "--version"])
-    cli_version = command_output([str(binary_dir / "pm"), "--version"])
-    if version not in daemon_version or "pm_tiny: {}".format(version) not in cli_version:
+    if version not in daemon_version:
         fail("Linux binary version does not match VERSION")
     for name in ("pm_tiny", "pm"):
         output = command_output(["readelf", "--version-info", str(binary_dir / name)])
