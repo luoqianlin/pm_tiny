@@ -230,23 +230,29 @@ command_parse_result parse_command_line(const std::vector<std::string> &args) {
         return result;
     }
 
-    struct named_command { const char *name; command_kind kind; bool allow_log; };
+    struct named_command { const char *name; command_kind kind; bool allow_log; bool allow_no_list; bool allow_history; };
     static constexpr named_command named_commands[] = {
-        {"stop", command_kind::stop, false},
-        {"restart", command_kind::restart, true},
-        {"delete", command_kind::remove, false},
-        {"log", command_kind::log, false},
-        {"inspect", command_kind::inspect, false},
+        {"stop", command_kind::stop, false, true, false},
+        {"restart", command_kind::restart, true, true, false},
+        {"delete", command_kind::remove, false, true, false},
+        {"log", command_kind::log, false, false, true},
+        {"inspect", command_kind::inspect, false, false, false},
     };
     for (const auto &candidate : named_commands) {
         if (name != candidate.name) continue;
         result.command.kind = candidate.kind;
         if (args.size() < 3) return failure(name + " requires a process name");
         result.command.name = args[2];
-        if (args.size() == 4 && candidate.allow_log && args[3] == "--log") {
-            result.command.show_log = true;
-        } else if (args.size() != 3) {
-            return failure("unexpected " + name + " argument: " + args[3]);
+        for (std::size_t i = 3; i < args.size(); ++i) {
+            if (candidate.allow_log && args[i] == "--log") {
+                result.command.show_log = true;
+            } else if (candidate.allow_no_list && args[i] == "--no-list") {
+                result.command.no_list = true;
+            } else if (candidate.allow_history && args[i] == "--history") {
+                result.command.log_history = true;
+            } else {
+                return failure("unexpected " + name + " argument: " + args[i]);
+            }
         }
         return result;
     }
@@ -260,7 +266,11 @@ command_parse_result parse_command_line(const std::vector<std::string> &args) {
     };
     for (const auto &candidate : plain_commands) {
         if (name != candidate.name) continue;
-        if (args.size() != 2) return failure(name + " does not accept arguments");
+        if (name == "reload" && args.size() == 3 && args[2] == "--no-list") {
+            result.command.no_list = true;
+        } else if (args.size() != 2) {
+            return failure(name + " does not accept arguments");
+        }
         result.command.kind = candidate.kind;
         return result;
     }
@@ -295,16 +305,18 @@ std::string command_usage(const std::string &executable, bool dynamic_start_supp
         << "  graph|dag [name] [--json|--dot] [--no-color]\n"
         << "  start <name> [--log]\n"
         << "  start <name> [options] -- <executable> [args...]\n"
-        << "  stop <name>\n"
-        << "  restart <name> [--log]\n"
-        << "  delete <name>\n"
-        << "  log <name>\n"
+        << "  restart <name> [--log] [--no-list]\n"
+        << "  stop <name> [--no-list]\n"
+        << "  delete <name> [--no-list]\n"
+        << "  log <name> [--history]\n"
         << "  inspect <name>\n"
         << "  info [--json]\n"
         << "  save\n"
-        << "  reload\n"
+        << "  reload [--no-list]\n"
         << "  quit\n"
         << "  version\n";
+    out << "\nControl options:\n"
+        << "  --no-list                 suppress the post-command process list\n";
     if (dynamic_start_supported) {
         out << "\nProcess options:\n"
             << "  --cwd <path> --kill-timeout <seconds> --user <user>\n"

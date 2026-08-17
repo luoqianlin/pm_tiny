@@ -208,7 +208,42 @@ string message
 
 ## 日志流
 
-`log`、`start --log` 和 `restart --log` 先返回普通响应；成功后返回 `STREAM` 帧。订阅从当前 generation 最近 64 KiB 开始并实时跟随，generation 结束后发送不带 `MORE` 的最终空帧，且不跨自动重启。活跃数据帧始终设置 `MORE`。每个客户端会话最多排队 1 MiB，慢客户端超限时只断开该会话；daemon 始终继续读取子进程管道、更新 tail 并写盘，不会因慢客户端反压业务进程。
+`0x30 log` 请求 payload 使用独立 schema；为便于旧 live 请求得到明确诊断，daemon 仍能读取只含名称的旧
+payload，但当前 CLI 总是发送完整结构：
+
+```text
+string name
+i32 log_request_schema_version       // 当前为 1
+i32 mode                             // 0 live, 1 history
+```
+
+成功响应在通用字段后附带：
+
+```text
+i32 log_response_schema_version      // 当前为 1
+i32 mode
+u64 generation
+i64 last_pid
+i64 last_exit_time_unix_ms           // UTC Unix epoch；live 无已完成实例时为 0
+string exit_reason                   // exited/signaled/unknown；不可用时为空
+i32 exit_code
+```
+
+CLI 要求该元数据存在，缺少或 mode 不匹配视为客户端与 daemon 版本/能力不匹配，不通过额外 `list` 请求
+预判状态。`pm log <name>` 对正在运行的 generation 从最近 64 KiB 开始并实时跟随；如果目标正处于
+自动重启退避等待，则保持请求，等下一 generation 成功启动后再返回元数据并开始跟随，不回放上一代缓存。
+等待期间被 stop/delete/reload、重启被抑制或下一代启动失败时返回错误。generation 结束时最终帧携带统一退出事件文本
+`[pm_tiny] process \`<name>\` exited: pid=<pid> reason=<reason> code=<code>`，且不跨自动重启。活跃数据帧始终设置
+`MORE`。每个客户端会话最多排队 1 MiB，慢客户端超限时只断开该会话；daemon 始终继续读取子进程管道、更新 tail
+并写盘，不会因慢客户端反压业务进程。
+
+`pm log <name> --history` 仅接受 stopped/restart-waiting 且存在已完成 generation 的记录，先输出包含
+generation、UTC 退出时间、PID、reason 和 code 的历史提示，再回放最后一代最多 64 KiB 缓存并立即结束；
+不会合成实时退出事件。进程仍在运行、没有完成过 generation、记录已被 delete/reload 移除或 daemon 重启后
+没有内存缓存时返回错误。退出事件只发送给当时的 live 订阅者，不写入历史 tail。
+
+`start --log` 在目标实际启动后绑定其 generation。`restart --log` 必须等旧进程树完全终止且新 generation
+成功启动后响应并绑定新实例，不回放旧 generation 缓存、终止尾部或旧 PID 退出事件；新实例启动失败时返回错误。
 
 日志文件打开、写入或轮转失败不会阻止受管进程运行。未持久化字节计入 `log_dropped_bytes`，daemon 按 1/2/4/8/16/32/60 秒退避重试；恢复后只写入新数据，不回放已经丢失的数据。有效路径及降级状态通过 list v5 和 inspect v2 暴露。
 
@@ -241,7 +276,7 @@ SDK 4.0 在 Linux、Android 和 Windows 使用相同状态机：每个启用客�
 
 ## Windows 差异
 
-Windows 使用 `\\.\pipe\pm_tiny` 的 byte-stream 模式承载同一 v3 帧格式；命名管道的消息边界不作为协议边界，接收端按头部中的 `payload_len` 重组。daemon 主线程通过单个 Asio `io_context` 驱动 overlapped accept、控制会话、根进程退出通知和日志管道，不为客户端或程序创建线程；不完整帧超过 5 秒或帧非法时仅关闭对应连接。控制管道的 SDDL 在每个 `CreateNamedPipeW` 实例上显式应用，非法 SDDL 会阻止 daemon 启动。除上述结构化响应外，普通响应统一为 `i32 status_code + string message`。`stop/delete/restart` 在 generation 对应的完整进程树操作完成后响应；`log` 与 `start --log` 使用按块发送的 `STREAM` 帧，每会话发送队列上限为 1 MiB，慢客户端只会断开自身。
+Windows 使用 `\\.\pipe\pm_tiny` 的 byte-stream 模式承载同一 v3 帧格式；命名管道的消息边界不作为协议边界，接收端按头部中的 `payload_len` 重组。daemon 主线程通过单个 Asio `io_context` 驱动 overlapped accept、控制会话、根进程退出通知和日志管道，不为客户端或程序创建线程；不完整帧超过 5 秒或帧非法时仅关闭对应连接。控制管道的 SDDL 在每个 `CreateNamedPipeW` 实例上显式应用，默认允许 `SYSTEM`、管理员和本机交互用户，并通过 `PIPE_REJECT_REMOTE_CLIENTS` 拒绝远程访问；非法 SDDL 会阻止 daemon 启动。除上述结构化响应外，普通响应统一为 `i32 status_code + string message`。`stop/delete/restart` 在 generation 对应的完整进程树操作完成后响应；`log` 与 `start --log` 使用按块发送的 `STREAM` 帧，每会话发送队列上限为 1 MiB，慢客户端只会断开自身。
 
 daemon、CLI 和 daemon 注入给应用 SDK 的管道名均可由 `PM_TINY_PIPE_NAME` 覆盖。未设置时，
 Windows CLI 会通过 `PM_TINY_HOME\pm_tiny.yaml` 读取 `pm_tiny_pipe_name`，最后才使用

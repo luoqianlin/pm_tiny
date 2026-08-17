@@ -1,4 +1,5 @@
 #include "asio_named_pipe.h"
+#include "daemon_config.h"
 
 #include <asio.hpp>
 
@@ -19,10 +20,12 @@ namespace {
 
 std::wstring control_pipe_sddl() {
     const DWORD required = GetEnvironmentVariableW(L"PM_TINY_PIPE_SDDL", nullptr, 0);
-    if (required == 0) return L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    const std::wstring default_sddl(windows_default_pipe_sddl,
+                                    windows_default_pipe_sddl + sizeof(windows_default_pipe_sddl) - 1);
+    if (required == 0) return default_sddl;
     std::vector<wchar_t> value(required, L'\0');
     if (GetEnvironmentVariableW(L"PM_TINY_PIPE_SDDL", value.data(), required) == 0)
-        return L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+        return default_sddl;
     return std::wstring(value.data());
 }
 
@@ -173,11 +176,16 @@ public:
         attributes.nLength = sizeof(attributes);
         attributes.lpSecurityDescriptor = descriptor;
         pipe = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+                                    PIPE_REJECT_REMOTE_CLIENTS,
                                 PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 5000, &attributes);
         LocalFree(descriptor);
         if (pipe == INVALID_HANDLE_VALUE) {
-            error = "CreateNamedPipe failed: " + std::to_string(GetLastError());
+            const auto last_error = GetLastError();
+            error = "CreateNamedPipe failed: " + std::to_string(last_error);
+            if (last_error == ERROR_ACCESS_DENIED) {
+                error += " (access denied; verify pm_tiny_pipe_sddl grants the daemon identity access)";
+            }
             return false;
         }
         event = CreateEventW(nullptr, TRUE, FALSE, nullptr);

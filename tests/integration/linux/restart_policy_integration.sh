@@ -29,6 +29,13 @@ sleep .3
 exit 1
 EOF
 chmod +x "$TMP/crash_once.sh"
+cat > "$TMP/restart_gap.sh" <<EOF
+#!/usr/bin/env bash
+echo launch >> "$TMP/restart_gap_launches.txt"
+sleep .3
+exit 1
+EOF
+chmod +x "$TMP/restart_gap.sh"
 cat > "$TMP/prog.yaml" <<EOF
 - name: crash_loop
   cwd: $TMP
@@ -40,6 +47,17 @@ cat > "$TMP/prog.yaml" <<EOF
   restart_max_delay_ms: 50
   restart_window_ms: 10000
   restart_max_attempts: 2
+  restart_reset_after_ms: 10000
+- name: restart_gap
+  cwd: $TMP
+  executable: ./restart_gap.sh
+  start_timeout: 0
+  daemon: true
+  pty: false
+  restart_delay_ms: 2000
+  restart_max_delay_ms: 2000
+  restart_window_ms: 10000
+  restart_max_attempts: 10
   restart_reset_after_ms: 10000
 EOF
 cat > "$TMP/pm_tiny.yaml" <<EOF
@@ -60,6 +78,43 @@ export PM_TINY_APP_LOG_DIR="$TMP/logs" PM_TINY_APP_ENVIRON_DIR="$TMP/environ"
 DAEMON_PID=$!
 for _ in $(seq 1 100); do [[ -S "$TMP/pm.sock" ]] && break; sleep .05; done
 [[ -S "$TMP/pm.sock" ]]
+
+for _ in $(seq 1 100); do
+    gap_status=$("$BIN/pm" list --json)
+    gap_pending=$(python3 -c '
+import json, sys
+item = next(item for item in json.load(sys.stdin)["processes"] if item["name"] == "restart_gap")
+print("yes" if item["restart_pending"] and item["pid"] is None else "no")
+' <<< "$gap_status")
+    [[ "$gap_pending" == yes ]] && break
+    sleep .05
+done
+[[ "$gap_pending" == yes ]]
+"$BIN/pm" stop restart_gap --no-list >"$TMP/stop-gap.out" 2>"$TMP/stop-gap.err"
+[[ ! -s "$TMP/stop-gap.out" ]]
+[[ ! -s "$TMP/stop-gap.err" ]]
+gap_status=$("$BIN/pm" list --json)
+python3 -c '
+import json, sys
+item = next(item for item in json.load(sys.stdin)["processes"] if item["name"] == "restart_gap")
+assert item["state"] == "stopped"
+assert item["restart_pending"] is False
+assert item["restart_attempts_in_window"] == 0
+' <<< "$gap_status"
+gap_before=$(wc -l < "$TMP/restart_gap_launches.txt")
+sleep 2.3
+[[ $(wc -l < "$TMP/restart_gap_launches.txt") -eq "$gap_before" ]]
+"$BIN/pm" stop restart_gap --no-list >"$TMP/stop-gap-again.out" 2>"$TMP/stop-gap-again.err"
+[[ ! -s "$TMP/stop-gap-again.out" ]]
+[[ ! -s "$TMP/stop-gap-again.err" ]]
+"$BIN/pm" start restart_gap >/dev/null
+for _ in $(seq 1 100); do
+    gap_after=$(wc -l < "$TMP/restart_gap_launches.txt")
+    [[ "$gap_after" -gt "$gap_before" ]] && break
+    sleep .05
+done
+[[ "$gap_after" -gt "$gap_before" ]]
+"$BIN/pm" stop restart_gap --no-list >/dev/null
 
 for _ in $(seq 1 100); do
     status=$("$BIN/pm" list --json)

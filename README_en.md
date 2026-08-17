@@ -75,7 +75,7 @@ Android builds statically link libc++, so binaries do not depend on `libc++_shar
 | `pm start <name> [options] -- <executable> [args...]` | Dynamically add and start a runtime definition on all three platforms. |
 | `pm start <name>` | Start a configured process and its dependency closure. |
 | `pm stop\|restart\|delete <name>` | Stop, restart, or remove a process. |
-| `pm log\|inspect <name>` | Stream logs or inspect configuration and runtime details. |
+| `pm log <name> [--history]` / `pm inspect <name>` | Follow a running generation or show the final cached generation of a stopped process; inspect configuration and runtime details. |
 | `pm save` / `pm reload` | Persist current definitions or reload the configuration file. |
 | `pm quit` / `pm version` | Stop the daemon or show its version. |
 
@@ -139,15 +139,16 @@ cmake --install build
 - [IPC protocol v3](docs/protocol_v3.md)
 - [Daemon arguments, environment, and paths](docs/daemon_configuration.md)
 - [Windows port status and limitations](docs/windows_port_status.md)
+- [Test platform: real cgroup/PTY, coverage, fuzzing, and release rollback](docs/testing_platform.md)
 - [Project directory and test conventions](docs/project_structure.md)
 - [Project direction, comparisons, and roadmap](docs/project_roadmap.md)
 - [Benchmarks and project comparison](docs/benchmark.md)
 - [Changelog](CHANGELOG.md)
-- [Contributing guide](CONTRIBUTING.md)
+- [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
 PM_Tiny remains local-first, low-overhead, and offline deployable. It does not aim to replace systemd, Android init, or Windows SCM, and the core daemon will not embed a Web UI, cloud management plane, or container orchestration layer.
 
 ## License
 
-PM_Tiny is released under the [Apache License 2.0](LICENSE). Bundled third-party dependencies remain under their respective licenses.
+PM_Tiny is released under the [Apache License 2.0](LICENSE). Bundled third-party dependencies retain their respective licenses.

@@ -1,4 +1,5 @@
 #include "program_log.h"
+#include "frame_stream.hpp"
 #include "rotating_log_writer.h"
 
 #include <cstdio>
@@ -68,6 +69,35 @@ int main() {
     require(tail.snapshot() == "cdefg", "ring tail wrap");
     require(tail.begin_offset() == 2 && tail.total_bytes() == 7, "ring offsets");
     require(tail.read(4, 2) == "ef", "ring read offset");
+
+    pm_tiny::program_log_request log_request;
+    log_request.name = "中文-app";
+    log_request.mode = pm_tiny::log_request_mode::history;
+    std::vector<std::uint8_t> log_request_payload;
+    pm_tiny::append_program_log_request(log_request_payload, log_request);
+    const auto decoded_log_request = pm_tiny::read_program_log_request(log_request_payload);
+    require(decoded_log_request.name == log_request.name &&
+            decoded_log_request.mode == pm_tiny::log_request_mode::history,
+            "program log request roundtrip");
+
+    pm_tiny::program_log_response log_response;
+    log_response.mode = pm_tiny::log_request_mode::history;
+    log_response.generation = 7;
+    log_response.last_pid = 1234;
+    log_response.last_exit_time_unix_ms = 1723766400000LL;
+    log_response.exit_reason = "exited";
+    log_response.exit_code = 0;
+    std::vector<std::uint8_t> log_response_payload;
+    pm_tiny::append_program_log_response(log_response_payload, log_response);
+    pm_tiny::iframe_stream log_response_stream(log_response_payload);
+    const auto decoded_log_response = pm_tiny::read_program_log_response(log_response_stream);
+    require(decoded_log_response.generation == 7 && decoded_log_response.last_pid == 1234 &&
+            decoded_log_response.mode == pm_tiny::log_request_mode::history,
+            "program log response roundtrip");
+    require(pm_tiny::format_program_log_history_header("中文-app", decoded_log_response) ==
+            "[pm_tiny] showing cached log for stopped process `中文-app`; generation=7 "
+            "last_exit=2024-08-16T00:00:00Z pid=1234 reason=exited code=0\n",
+            "program log history header");
 
     pm_tiny::log_sink_health health;
     health.record_failure(100, 7, "open failed");

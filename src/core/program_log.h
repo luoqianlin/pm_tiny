@@ -8,6 +8,8 @@
 
 namespace pm_tiny {
 
+class iframe_stream;
+
 enum class log_mode_t : std::int32_t {
     split = 0,
     combined = 1,
@@ -22,6 +24,39 @@ std::vector<std::string> derive_log_paths(const std::string &directory,
                                           const std::string &program_name,
                                           log_mode_t mode,
                                           const std::string &configured_name);
+std::string format_program_exit_event(const std::string &name,
+                                      std::int64_t pid,
+                                      const std::string &reason,
+                                      std::int32_t code);
+
+enum class log_request_mode : std::int32_t {
+    live = 0,
+    history = 1,
+};
+
+struct program_log_request {
+    std::string name;
+    log_request_mode mode = log_request_mode::live;
+};
+
+struct program_log_response {
+    log_request_mode mode = log_request_mode::live;
+    std::uint64_t generation = 0;
+    std::int64_t last_pid = -1;
+    std::int64_t last_exit_time_unix_ms = 0;
+    std::string exit_reason;
+    std::int32_t exit_code = 0;
+};
+
+void append_program_log_request(std::vector<std::uint8_t> &payload,
+                                const program_log_request &request);
+program_log_request read_program_log_request(const std::vector<std::uint8_t> &payload);
+void append_program_log_response(std::vector<std::uint8_t> &payload,
+                                 const program_log_response &response);
+program_log_response read_program_log_response(iframe_stream &stream);
+std::int64_t current_unix_time_millis();
+std::string format_program_log_history_header(const std::string &name,
+                                              const program_log_response &response);
 
 class bounded_log_tail {
 public:

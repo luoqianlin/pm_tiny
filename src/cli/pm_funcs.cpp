@@ -26,6 +26,7 @@
 #include "runtime_snapshot.h"
 #include "dependency_graph_renderer.h"
 #include "cli_command.h"
+#include "cli_response.h"
 
 extern volatile sig_atomic_t pm_is_stop;
 namespace pm_funcs {
@@ -97,16 +98,32 @@ namespace pm_funcs {
             if (!write_command(session, frame)) return nullptr;
             return read_response(session);
         }
-    }
 
-    void show_msg(int code, const std::string &msg) {
-        if (code != 0) {
-            fprintf(stderr, "\033[31mFail(%d):%s\n\033[0m", code, msg.c_str());
-        } else {
-            printf("\033[32mSuccess\n\033[0m");
+        bool handle_response(const pm_tiny::cli::parsed_command &command,
+                             const pm_tiny::frame_t &frame,
+                             pm_tiny::cli::cli_response_result &result,
+                             const pm_tiny::cli::list_render_options *list_options = nullptr,
+                             const pm_tiny::cli::dependency_graph_render_options *graph_options = nullptr) {
+            try {
+                result = pm_tiny::cli::interpret_control_response(
+                    command, frame, PM_TINY_VERSION, list_options, graph_options);
+                if (!result.stdout_text.empty()) std::fputs(result.stdout_text.c_str(), stdout);
+                if (!result.stderr_text.empty()) std::fputs(result.stderr_text.c_str(), stderr);
+                return result.success;
+            } catch (const std::exception &error) {
+                std::fprintf(stderr, "pm: invalid response from pm_tiny: %s\n", error.what());
+                return false;
+            }
+        }
+
+        pm_tiny::cli::parsed_command named_command(pm_tiny::cli::command_kind kind,
+                                                    const std::string &name = {}) {
+            pm_tiny::cli::parsed_command command;
+            command.kind = kind;
+            command.name = name;
+            return command;
         }
     }
-
 
     bool inspect_proc(pm_tiny::session_t &session, const std::string &app_name) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
@@ -114,21 +131,9 @@ namespace pm_funcs {
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::inspect)));
         pm_tiny::fappend_value(*f, app_name);
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            if (code != 0) {
-                show_msg(code, msg);
-                return false;
-            }
-            const auto snapshot = pm_tiny::read_inspect_snapshot(ifs);
-            std::cout << pm_tiny::cli::render_inspect_snapshot(snapshot);
-            return true;
-        }
-        return false;
+        if (!rf) return false;
+        pm_tiny::cli::cli_response_result result;
+        return handle_response(named_command(pm_tiny::cli::command_kind::inspect, app_name), *rf, result);
     }
 
     bool display_daemon_info(pm_tiny::session_t &session, bool json) {
@@ -137,18 +142,10 @@ namespace pm_funcs {
             pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::info)));
         auto response = request(session, f);
         if (!response) return false;
-        try {
-            pm_tiny::iframe_stream stream(*response);
-            std::int32_t status = -1;
-            std::string message;
-            stream >> status >> message;
-            if (status != 0) { show_msg(status, message); return false; }
-            std::cout << pm_tiny::cli::render_daemon_info(pm_tiny::read_daemon_info(stream), json);
-            return true;
-        } catch (const std::exception &error) {
-            fprintf(stderr, "Invalid daemon-info response: %s\n", error.what());
-            return false;
-        }
+        auto command = named_command(pm_tiny::cli::command_kind::info);
+        command.info_json = json;
+        pm_tiny::cli::cli_response_result result;
+        return handle_response(command, *response, result);
     }
 
     bool display_proc_infos(pm_tiny::session_t &session,
@@ -167,19 +164,9 @@ namespace pm_funcs {
             return false;
         }
         if (rf) {
-            try {
-                pm_tiny::iframe_stream ifs(*rf);
-                int code = 0;
-                std::string msg;
-                ifs >> code >> msg;
-                if (code != 0) { show_msg(code, msg); return false; }
-                const auto entries = pm_tiny::read_process_list(ifs);
-                std::cout << pm_tiny::cli::render_process_list(entries, effective_options);
-                return true;
-            } catch (const std::exception &error) {
-                fprintf(stderr, "Invalid process-list response: %s\n", error.what());
-                return false;
-            }
+            pm_tiny::cli::cli_response_result result;
+            return handle_response(named_command(pm_tiny::cli::command_kind::list), *rf, result,
+                                   &effective_options);
         } else if (!pm_is_stop) {
             printf("no data read\n");
         }
@@ -200,40 +187,23 @@ namespace pm_funcs {
             if (!pm_is_stop) fprintf(stderr, "no data read\n");
             return false;
         }
-        try {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code >> msg;
-            if (code != 0) {
-                show_msg(code, msg);
-                return false;
-            }
-            std::cout << pm_tiny::cli::render_dependency_graph(pm_tiny::read_process_list(ifs), options);
-            return true;
-        } catch (const std::exception &error) {
-            fprintf(stderr, "Cannot render dependency graph: %s\n", error.what());
-            return false;
-        }
+        pm_tiny::cli::cli_response_result result;
+        return handle_response(named_command(pm_tiny::cli::command_kind::graph), *rf, result,
+                               nullptr, &options);
     }
 
-    bool stop_proc(pm_tiny::session_t &session, const std::string &app_name) {
+    bool stop_proc(pm_tiny::session_t &session, const std::string &app_name, bool no_list) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::stop)));
         pm_tiny::fappend_value(*f, app_name);
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            show_msg(code, msg);
-            if (code == 0) display_proc_infos(session);
-            return code == 0;
-        }
-        return false;
+        if (!rf) return false;
+        auto command = named_command(pm_tiny::cli::command_kind::stop, app_name);
+        command.no_list = no_list;
+        pm_tiny::cli::cli_response_result result;
+        if (!handle_response(command, *rf, result)) return false;
+        return !result.post_list || display_proc_infos(session);
     }
 
 
@@ -246,31 +216,13 @@ namespace pm_funcs {
         f->insert(f->end(), payload.begin(), payload.end());
         auto rf = request(session, f);
         if (!rf) return false;
-        pm_tiny::iframe_stream ifs(*rf);
-        int code = 0;
-        std::string msg;
-        ifs >> code >> msg;
-        if (code != 0) {
-            show_msg(code, msg);
-            return false;
-        }
-        const auto response = pm_tiny::read_start_response(ifs.remaining_frame());
-        if (response.result == pm_tiny::start_result::started) {
-            std::printf("started `%s` pid=%lld%s\n", start_request.name.c_str(),
-                        static_cast<long long>(response.pid),
-                        start_request.mode == pm_tiny::start_mode::create ? "; run `pm save` to persist" : "");
-        } else if (response.result == pm_tiny::start_result::waiting) {
-            std::printf("waiting `%s`", start_request.name.c_str());
-            if (!response.blocked_by.empty()) std::printf(" for: %s", mgr::utils::join(response.blocked_by, ",").c_str());
-            std::printf("\n");
-        } else {
-            std::fprintf(stderr, "blocked `%s` by: %s\n", start_request.name.c_str(),
-                         mgr::utils::join(response.blocked_by, ",").c_str());
-            return false;
-        }
-        if (start_request.show_log && response.result != pm_tiny::start_result::blocked)
-            return loop_read_show_process_log(session);
-        return true;
+        auto command = named_command(pm_tiny::cli::command_kind::start);
+        command.start.name = start_request.name;
+        command.start.create = start_request.mode == pm_tiny::start_mode::create;
+        command.start.show_log = start_request.show_log;
+        pm_tiny::cli::cli_response_result result;
+        if (!handle_response(command, *rf, result)) return false;
+        return !result.stream_expected || loop_read_show_process_log(session);
     }
 
 
@@ -280,62 +232,43 @@ namespace pm_funcs {
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::save)));
         auto rf = request(session, f);
 
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            show_msg(code, msg);
-            return code == 0;
-        }
-        return false;
+        if (!rf) return false;
+        pm_tiny::cli::cli_response_result result;
+        return handle_response(named_command(pm_tiny::cli::command_kind::save), *rf, result);
     }
 
 
-    bool delete_prog(pm_tiny::session_t &session, const std::string &app_name) {
+    bool delete_prog(pm_tiny::session_t &session, const std::string &app_name, bool no_list) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::remove)));
         pm_tiny::fappend_value(*f, app_name);
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            show_msg(code, msg);
-            if (code == 0) display_proc_infos(session);
-            return code == 0;
-        }
-        return false;
+        if (!rf) return false;
+        auto command = named_command(pm_tiny::cli::command_kind::remove, app_name);
+        command.no_list = no_list;
+        pm_tiny::cli::cli_response_result result;
+        if (!handle_response(command, *rf, result)) return false;
+        return !result.post_list || display_proc_infos(session);
     }
 
 
     bool restart_prog(pm_tiny::session_t &session, const std::string &app_name
-                      ,bool show_log) {
+                      ,bool show_log, bool no_list) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::restart)));
         pm_tiny::fappend_value(*f, app_name);
         pm_tiny::fappend_value(*f, show_log ? 1 : 0);
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            if (code != 1) {
-                show_msg(code, msg);
-                if (code == 0) display_proc_infos(session);
-                return code == 0;
-            } else {
-                return loop_read_show_process_log(session);
-            }
-        }
-        return false;
+        if (!rf) return false;
+        auto command = named_command(pm_tiny::cli::command_kind::restart, app_name);
+        command.show_log = show_log;
+        command.no_list = no_list;
+        pm_tiny::cli::cli_response_result result;
+        if (!handle_response(command, *rf, result)) return false;
+        if (result.stream_expected) return loop_read_show_process_log(session);
+        return !result.post_list || display_proc_infos(session);
     }
 
     bool show_version(pm_tiny::session_t &session) {
@@ -344,37 +277,23 @@ namespace pm_funcs {
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::version)));
         auto rf = request(session, f);
 
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code >> msg;
-            std::string version;
-            ifs >> version;
-            if (code == 0) {
-                fprintf(stdout, "pm: %s\n", PM_TINY_VERSION);
-                fprintf(stdout, "pm_tiny: %s\n", version.c_str());
-                return true;
-            } else {
-                show_msg(code, msg);
-            }
-        }
-        return false;
+        if (!rf) return false;
+        pm_tiny::cli::cli_response_result result;
+        return handle_response(named_command(pm_tiny::cli::command_kind::version), *rf, result);
     }
 
     bool loop_read_show_process_log(pm_tiny::session_t &session) {
-        int msg_type = 0;
+        int msg_type = 1;
         std::string msg_content;
         while (!pm_is_stop) {
             if (session.is_close()) {
                 break;
             }
-            if (wait_socket(session.get_fd(), false) != wait_result_t::ready) break;
-            session.read();
-            msg_type = 1;
+            bool consumed_frame = false;
             while (true) {
                 auto rf = session.get_frame_from_buf();
                 if (!rf)break;
+                consumed_frame = true;
                 pm_tiny::iframe_stream ifs(*rf);
                 ifs >> msg_type;
                 std::string msg_content_tmp;
@@ -393,50 +312,44 @@ namespace pm_funcs {
             if (msg_type == 0) {
                 break;
             }
+            if (consumed_frame) continue;
+            if (wait_socket(session.get_fd(), false) != wait_result_t::ready) break;
+            session.read();
         }
-        printf("%s", PM_TINY_ANSI_COLOR_REST);
-        fflush(stdout);
         return !pm_is_stop && msg_type == 0;
     }
 
-    bool show_prog_log(pm_tiny::session_t &session, const std::string &app_name) {
+    bool show_prog_log(pm_tiny::session_t &session, const std::string &app_name, bool history) {
         pm_tiny::frame_ptr_t f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::log)));
-        pm_tiny::fappend_value(*f, app_name);
+        pm_tiny::program_log_request log_request;
+        log_request.name = app_name;
+        log_request.mode = history ? pm_tiny::log_request_mode::history : pm_tiny::log_request_mode::live;
+        std::vector<std::uint8_t> payload;
+        pm_tiny::append_program_log_request(payload, log_request);
+        f->insert(f->end(), payload.begin(), payload.end());
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            if (code != 0) {
-                show_msg(code, msg);
-                return false;
-            } else {
-                return loop_read_show_process_log(session);
-            }
-        }
-        return false;
+        if (!rf) return false;
+        pm_tiny::cli::cli_response_result result;
+        auto command = named_command(pm_tiny::cli::command_kind::log, app_name);
+        command.log_history = history;
+        if (!handle_response(command, *rf, result))
+            return false;
+        return result.stream_expected && loop_read_show_process_log(session);
     }
 
-    bool pm_tiny_reload(pm_tiny::session_t &session, int) {
+    bool pm_tiny_reload(pm_tiny::session_t &session, int, bool no_list) {
         auto f = std::make_unique<pm_tiny::frame_t>();
         f->push_back(static_cast<std::uint8_t>(
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::reload)));
         auto rf = request(session, f);
-        if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            show_msg(code, msg);
-            if (code == 0) display_proc_infos(session);
-            return code == 0;
-        }
-        return false;
+        if (!rf) return false;
+        auto command = named_command(pm_tiny::cli::command_kind::reload);
+        command.no_list = no_list;
+        pm_tiny::cli::cli_response_result result;
+        if (!handle_response(command, *rf, result)) return false;
+        return !result.post_list || display_proc_infos(session);
     }
 
     bool pm_tiny_quit(pm_tiny::session_t &session) {
@@ -445,21 +358,14 @@ namespace pm_funcs {
                 pm_tiny::cli::command_protocol_type(pm_tiny::cli::command_kind::quit)));
         auto rf = request(session, f);
         if (rf) {
-            pm_tiny::iframe_stream ifs(*rf);
-            int pid;
-            int code = 0;
-            std::string msg;
-            ifs >> code;
-            ifs >> msg;
-            ifs >> pid;
-            if (code == 0) {
+            pm_tiny::cli::cli_response_result result;
+            if (!handle_response(named_command(pm_tiny::cli::command_kind::quit), *rf, result)) return false;
+            const int pid = static_cast<int>(result.daemon_pid);
+            if (result.success) {
                 constexpr int quit_timeout_seconds = 30;
-                printf("Waiting up to %d seconds for pm_tiny (pid %d) to exit", quit_timeout_seconds, pid);
-                fflush(stdout);
                 const auto wait_result = pm_tiny::wait_for_process_exit(
                         pid, quit_timeout_seconds * 1000, 100,
                         []() { return pm_is_stop != 0; });
-                printf("\n");
                 if (wait_result == pm_tiny::process_wait_result::timed_out) {
                     fprintf(stderr,
                             "pm: timed out after %d seconds waiting for pm_tiny (pid %d) to exit\n"
@@ -472,10 +378,7 @@ namespace pm_funcs {
                     return false;
                 }
             }
-            if (!pm_is_stop) {
-                show_msg(code, msg);
-            }
-            return code == 0;
+            return result.success;
         }
         return false;
     }

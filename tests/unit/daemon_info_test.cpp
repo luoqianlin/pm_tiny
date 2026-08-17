@@ -58,6 +58,11 @@ int main() {
         const auto text = pm_tiny::cli::render_daemon_info(output, false);
         expect(text.find("Configuration") != std::string::npos && text.find("field") != std::string::npos,
                "text groups missing");
+        expect(text.find("log_degraded:") != std::string::npos &&
+               text.find("process_tree_degraded:") != std::string::npos,
+               "text degraded fields should be unambiguous");
+        expect(text.find("\n  degraded:") == std::string::npos,
+               "text should not expose ambiguous degraded fields");
 
         auto invalid_schema = frame;
         invalid_schema[3] = 2;

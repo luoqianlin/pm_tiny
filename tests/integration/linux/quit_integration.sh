@@ -77,7 +77,8 @@ timeout --kill-after=1s 10s "$BIN/pm" quit >"$TMP/direct-quit.out" 2>"$TMP/direc
 wait "$DAEMON_PID"
 DAEMON_PID=
 ! kill -0 "$CHILD_PID" 2>/dev/null
-grep -q 'Success' "$TMP/direct-quit.out"
+[[ ! -s "$TMP/direct-quit.out" ]]
+[[ ! -s "$TMP/direct-quit.err" ]]
 
 configure zombie
 use_instance zombie
@@ -103,7 +104,8 @@ DAEMON_PID=$(cat "$TMP/zombie/daemon.pid")
 wait_socket "$PM_TINY_SOCK_FILE"
 "$BIN/pm" start zombie_child -- /usr/bin/sleep 300 >/dev/null
 timeout --kill-after=1s 10s "$BIN/pm" quit >"$TMP/zombie-quit.out" 2>"$TMP/zombie-quit.err"
-grep -q 'Success' "$TMP/zombie-quit.out"
+[[ ! -s "$TMP/zombie-quit.out" ]]
+[[ ! -s "$TMP/zombie-quit.err" ]]
 grep -q "^State:.*Z" "/proc/$DAEMON_PID/status"
 kill "$WRAPPER_PID"
 wait "$WRAPPER_PID" 2>/dev/null || true

@@ -35,6 +35,24 @@ Linux/Android 与 Windows 的日志目录和文件名规则一致：空 `log_dir
 CLI 退出码统一为：成功启动或正常等待依赖返回 `0`，daemon/业务失败返回 `1`，命令行参数错误返回
 `2`，日志流期间由 Ctrl+C 中断返回 `130`。
 
+## CLI 输出契约
+
+`stop`、`restart`、`delete` 和 `reload` 成功后默认输出一次最新进程列表；传入 `--no-list` 可关闭该列表，
+此时成功的 stdout 和 stderr 均为空。`save` 和 `quit` 成功时始终静默。业务失败统一写入 stderr，格式为
+`pm: error(<code>): <message>`。
+
+`log`、`start --log` 和 `restart --log` 成功时 stdout 只包含日志数据及进程退出事件，不包含 `OK`、
+`Success`、启动状态文本或 ANSI 控制码。Windows 动态 `start` 的空 `--cwd` 使用当前目录，非空相对路径也会
+在发送给 daemon 前解析为绝对路径。
+
+普通 `pm log <name>` 跟随正在运行的 generation；目标处于自动重启退避等待时会保持连接，等下一
+generation 成功启动后再跟随，且不会回放上一 generation。普通 stopped 状态返回非零，stdout 为空，
+stderr 提示使用 `pm log <name> --history`。等待期间被取消或下一代启动失败也返回非零。
+`--history` 只回放最后一个已完成 generation 的 64 KiB
+内存缓存，先输出 generation、UTC 退出时间、PID 和退出状态提示，然后立即返回，不输出伪实时退出事件；
+它对正在运行的进程返回非零；自动重启等待期间仍可查看上一 generation。delete/reload 移除定义或
+daemon 重启后没有缓存时也返回非零。
+
 Linux/Android 通过目标进程最终环境中的 `PATH` 解析 executable，再以结构化 argv 调用
 `execve`；Windows 使用相同的目标环境选择规则解析 executable，并将 executable 与按 Windows 标准规则
 转义后的命令行分别传给 `CreateProcessW`。
@@ -42,5 +60,7 @@ Linux/Android 通过目标进程最终环境中的 `PATH` 解析 executable，�
 `start --log` 在 `started` 后立即订阅日志；若启动结果为 `waiting`，客户端连接会保留到依赖满足且目标
 真正启动，再开始发送日志。Windows 控制面由 daemon 主线程上的单个 `io_context` 驱动控制会话、
 根进程退出通知和 overlapped 日志管道，不创建控制连接线程或每程序日志线程。
+`restart --log` 同样只在旧进程树退出且新 generation 成功启动后进入日志流；旧 generation 的缓存、
+终止尾部和退出事件不会混入输出，新 generation 启动失败则命令失败。
 
 程序名必须满足 `[A-Za-z0-9][A-Za-z0-9._-]*`，长度为 1 到 128。该规则同时约束配置、动态定义和依赖名称，避免名称进入日志及环境 sidecar 路径时发生路径穿越。

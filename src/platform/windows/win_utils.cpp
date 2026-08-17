@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <locale>
 #include <cwctype>
@@ -21,6 +22,30 @@ namespace {
 
 bool is_quote(char ch) {
     return ch == '\'' || ch == '"';
+}
+
+void write_utf8(DWORD standard_handle, FILE *fallback, const std::string &text) {
+    const HANDLE handle = GetStdHandle(standard_handle);
+    DWORD mode = 0;
+    if (handle != nullptr && handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode)) {
+        try {
+            const auto wide = utf8_to_wide(text);
+            std::size_t offset = 0;
+            while (offset < wide.size()) {
+                const auto remaining = wide.size() - offset;
+                const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(remaining, 32767));
+                DWORD written = 0;
+                if (!WriteConsoleW(handle, wide.data() + offset, chunk, &written, nullptr) || written == 0) {
+                    break;
+                }
+                offset += written;
+            }
+            if (offset == wide.size()) return;
+        } catch (...) {
+        }
+    }
+    if (!text.empty()) std::fwrite(text.data(), 1, text.size(), fallback);
+    std::fflush(fallback);
 }
 
 } // namespace
@@ -227,6 +252,14 @@ std::string wide_to_utf8(const std::wstring &text) {
     }
     buffer[static_cast<size_t>(written)] = '\0';
     return std::string(buffer.data());
+}
+
+void write_stdout_utf8(const std::string &text) {
+    write_utf8(STD_OUTPUT_HANDLE, stdout, text);
+}
+
+void write_stderr_utf8(const std::string &text) {
+    write_utf8(STD_ERROR_HANDLE, stderr, text);
 }
 
 } // namespace win

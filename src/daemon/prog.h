@@ -104,6 +104,7 @@ namespace pm_tiny {
         int64_t last_dead_time_ms = 0;
         int last_wstatus = 0;
         bool has_last_exit = false;
+        std::int64_t last_exit_time_unix_ms = 0;
         int dead_count = 0;
         int dead_count_timer = 0;
         std::string name;
@@ -146,6 +147,7 @@ namespace pm_tiny {
         std::string config_source = "file";
 
         std::vector<session_t *> sessions;
+        std::vector<std::weak_ptr<session_t>> pending_log_sessions;
 
         std::vector<generation_task> kill_pendingtasks;
 
@@ -207,6 +209,12 @@ namespace pm_tiny {
         void enqueue_after_termination(task_fun_t task);
 
         void detach_sessions();
+
+        void wait_for_next_log_generation(const std::shared_ptr<session_t> &session);
+
+        void activate_pending_log_sessions();
+
+        void fail_pending_log_sessions(const std::string &message);
 
     };
 

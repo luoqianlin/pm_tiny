@@ -7,7 +7,6 @@
 
 #include <chrono>
 #include <algorithm>
-#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -100,6 +99,68 @@ std::string environment_value(const std::vector<std::string> &environment, const
     return {};
 }
 
+bool has_path_separator(const std::wstring &value) {
+    return value.find(L'\\') != std::wstring::npos || value.find(L'/') != std::wstring::npos;
+}
+
+bool has_extension(const std::wstring &value) {
+    const auto separator = value.find_last_of(L"\\/");
+    const auto dot = value.find_last_of(L'.');
+    return dot != std::wstring::npos && (separator == std::wstring::npos || dot > separator);
+}
+
+std::wstring absolute_path(const std::wstring &value) {
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length = GetFullPathNameW(value.c_str(), static_cast<DWORD>(buffer.size()),
+                                          buffer.data(), nullptr);
+    if (length == 0 || length >= buffer.size()) throw std::runtime_error("GetFullPathNameW failed");
+    return std::wstring(buffer.data(), length);
+}
+
+bool regular_file(const std::wstring &path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::wstring resolve_working_directory(const std::string &cwd) {
+    const auto resolved = absolute_path(cwd.empty() ? std::wstring(L".") : utf8_to_wide(cwd));
+    const DWORD attributes = GetFileAttributesW(resolved.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+        throw std::runtime_error("working directory not found: " + cwd);
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY))
+        throw std::runtime_error("working directory is not a directory: " + cwd);
+    return resolved;
+}
+
+std::wstring resolve_executable(const ProgramConfig &config,
+                                const std::vector<std::string> &environment,
+                                const std::wstring &cwd) {
+    const auto requested = utf8_to_wide(config.executable);
+    if (requested.empty()) throw std::runtime_error("resolve: executable is empty");
+    if (has_path_separator(requested)) {
+        const bool rooted = requested[0] == L'\\' || requested[0] == L'/' ||
+            (requested.size() > 1 && requested[1] == L':');
+        const auto candidate = absolute_path(rooted ? requested : cwd + L"\\" + requested);
+        if (regular_file(candidate)) return candidate;
+        if (!has_extension(candidate) && regular_file(candidate + L".exe")) return candidate + L".exe";
+        throw std::runtime_error("resolve: executable not found: " + config.executable);
+    }
+
+    const auto cwd_candidate = absolute_path(cwd + L"\\" + requested);
+    if (regular_file(cwd_candidate)) return cwd_candidate;
+    if (!has_extension(cwd_candidate) && regular_file(cwd_candidate + L".exe"))
+        return cwd_candidate + L".exe";
+
+    std::vector<wchar_t> buffer(32768);
+    const auto search_path = utf8_to_wide(environment_value(environment, "PATH"));
+    const DWORD length = SearchPathW(search_path.empty() ? L"" : search_path.c_str(), requested.c_str(),
+                                     has_extension(requested) ? nullptr : L".exe",
+                                     static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
+    if (length == 0 || length >= buffer.size())
+        throw std::runtime_error("resolve: executable not found: " + config.executable);
+    return absolute_path(std::wstring(buffer.data(), length));
+}
+
 void close_handle_safe(HANDLE &handle) {
     if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
         CloseHandle(handle);
@@ -113,7 +174,8 @@ bool create_overlapped_log_pipe(HANDLE &pipe_read, HANDLE &pipe_write,
                            L"_" + std::to_wstring(next_log_pipe.fetch_add(1));
     pipe_read = CreateNamedPipeW(
         pipe_name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 64 * 1024, 64 * 1024, 0, nullptr);
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 64 * 1024, 64 * 1024, 0, nullptr);
     if (pipe_read == INVALID_HANDLE_VALUE) {
         pipe_read = nullptr;
         error_message = "CreateNamedPipeW failed with error code " + std::to_string(GetLastError());
@@ -170,6 +232,8 @@ ProcessHandle &ProcessHandle::operator=(ProcessHandle &&other) noexcept {
         root_exit_code = other.root_exit_code;
         has_last_exit = other.has_last_exit;
         last_exit_code = other.last_exit_code;
+        last_exit_time_unix_ms = other.last_exit_time_unix_ms;
+        last_pid = other.last_pid;
         restart_count = other.restart_count;
         termination = other.termination;
         completion_action = other.completion_action;
@@ -197,6 +261,8 @@ ProcessHandle &ProcessHandle::operator=(ProcessHandle &&other) noexcept {
         other.root_exit_code = STILL_ACTIVE;
         other.has_last_exit = false;
         other.last_exit_code = 0;
+        other.last_exit_time_unix_ms = 0;
+        other.last_pid = 0;
         other.restart_count = 0;
         other.termination = termination_job{};
         other.completion_action = CompletionAction::automatic;
@@ -290,16 +356,14 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
 
     std::wstring cwd_w;
     LPCWSTR cwd_ptr = nullptr;
-    if (!handle.config.cwd.empty()) {
-        try {
-            cwd_w = utf8_to_wide(handle.config.cwd);
-            cwd_ptr = cwd_w.c_str();
-        } catch (const std::exception &ex) {
-            close_pipes();
-            close_handle_safe(job);
-            error_message = std::string("Failed to convert working directory: ") + ex.what();
-            return false;
-        }
+    try {
+        cwd_w = resolve_working_directory(handle.config.cwd);
+        cwd_ptr = cwd_w.c_str();
+    } catch (const std::exception &ex) {
+        close_pipes();
+        close_handle_safe(job);
+        error_message = ex.what();
+        return false;
     }
 
     std::vector<std::string> environment;
@@ -327,29 +391,11 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
         }
     }
     std::wstring executable_w;
-    try { executable_w = utf8_to_wide(handle.config.executable); }
+    try { executable_w = resolve_executable(handle.config, environment, cwd_w); }
     catch (const std::exception &ex) {
         close_pipes(); close_handle_safe(job);
-        error_message = std::string("Failed to convert executable to UTF-16: ") + ex.what();
+        error_message = ex.what();
         return false;
-    }
-    if (executable_w.find(L'\\') == std::wstring::npos && executable_w.find(L'/') == std::wstring::npos) {
-        std::vector<wchar_t> resolved(32768);
-        std::wstring search_path;
-        try { search_path = utf8_to_wide(environment_value(environment, "PATH")); }
-        catch (const std::exception &ex) {
-            close_pipes(); close_handle_safe(job);
-            error_message = std::string("resolve: invalid PATH: ") + ex.what();
-            return false;
-        }
-        const DWORD length = SearchPathW(search_path.empty() ? L"" : search_path.c_str(), executable_w.c_str(), nullptr,
-                                         static_cast<DWORD>(resolved.size()), resolved.data(), nullptr);
-        if (length == 0 || length >= resolved.size()) {
-            close_pipes(); close_handle_safe(job);
-            error_message = "resolve: executable not found: " + handle.config.executable;
-            return false;
-        }
-        executable_w.assign(resolved.data(), length);
     }
     BOOL success = CreateProcessW(
         executable_w.c_str(),
@@ -401,14 +447,15 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
     handle.job = job;
     handle.ready = false;
     handle.generation = next_generation.fetch_add(1);
+    handle.last_pid = process_info.dwProcessId;
     if (has_launched_before) ++handle.restart_count;
     handle.launch_time_ms = monotonic_millis();
     handle.last_tick_ms = handle.launch_time_ms;
     for (int i = 0; i < stream_count; ++i) handle.pipe_read[i] = pipe_read[i];
 
-    const char *default_log_dir = std::getenv("PM_TINY_APP_LOG_DIR");
+    const auto default_log_dir = daemon_environment(PM_TINY_APP_LOG_DIR);
     handle.log_paths = derive_log_paths(handle.config.log_dir.empty()
-                                            ? (default_log_dir ? default_log_dir : "logs")
+                                            ? (default_log_dir.empty() ? "logs" : default_log_dir)
                                             : handle.config.log_dir,
                                         handle.config.name, handle.config.log_mode,
                                         handle.config.log_file_name);
@@ -507,20 +554,31 @@ void append_program_log(ProcessHandle &handle, int stream_index, const char *dat
 bool rebuild_dependencies(RuntimeControlState &state,
                           const std::vector<ProgramConfig> &configs,
                           std::string &error_message) {
+    dependency_graph graph;
+    if (!build_dependencies(configs, graph, error_message)) return false;
+    replace_dependencies(state, std::move(graph));
+    return true;
+}
+
+bool build_dependencies(const std::vector<ProgramConfig> &configs,
+                        dependency_graph &graph,
+                        std::string &error_message) {
     std::vector<dependency_node_config> nodes;
     nodes.reserve(configs.size());
     for (const auto &config : configs) nodes.push_back({config.name, config.depends_on});
     dependency_error error;
-    dependency_graph graph;
     if (!dependency_graph::build(nodes, graph, error)) {
         error_message = error.message;
         return false;
     }
+    error_message.clear();
+    return true;
+}
+
+void replace_dependencies(RuntimeControlState &state, dependency_graph graph) {
     const auto snapshot = state.dependencies.snapshot();
     state.graph = std::move(graph);
     state.dependencies.migrate(state.graph, snapshot);
-    error_message.clear();
-    return true;
 }
 
 void ensure_process_records(std::vector<ProcessHandle> &processes,

@@ -21,29 +21,27 @@ namespace pm_funcs {
     bool display_dependency_graph(pm_tiny::session_t &session,
                                   const pm_tiny::cli::dependency_graph_render_options &options = {});
 
-    bool stop_proc(pm_tiny::session_t &session, const std::string &app_name);
+    bool stop_proc(pm_tiny::session_t &session, const std::string &app_name, bool no_list = false);
 
     bool start_proc(pm_tiny::session_t &session, const pm_tiny::start_request &request);
 
     bool save_proc(pm_tiny::session_t &session);
 
-    bool delete_prog(pm_tiny::session_t &session, const std::string &app_name);
+    bool delete_prog(pm_tiny::session_t &session, const std::string &app_name, bool no_list = false);
 
     bool restart_prog(pm_tiny::session_t &session, const std::string &app_name
-                      ,bool show_log);
+                      ,bool show_log, bool no_list = false);
 
     bool show_version(pm_tiny::session_t &session);
 
-    bool show_prog_log(pm_tiny::session_t &session, const std::string &app_name);
+    bool show_prog_log(pm_tiny::session_t &session, const std::string &app_name, bool history);
 
     bool loop_read_show_process_log(pm_tiny::session_t &session);
-
-    void show_msg(int code, const std::string &msg);
 
     bool inspect_proc(pm_tiny::session_t &session, const std::string &app_name);
 
     bool pm_tiny_quit(pm_tiny::session_t &session);
 
-    bool pm_tiny_reload(pm_tiny::session_t &session, int extra);
+    bool pm_tiny_reload(pm_tiny::session_t &session, int extra, bool no_list = false);
 }
 #endif //PM_TINY_PM_FUNCS_H

@@ -2,6 +2,28 @@
 
 All notable changes to PM_Tiny are documented in this file.
 
+## [4.1.0] - 2026-08-17
+
+### Added
+
+- `pm log <name> --history` for the final in-memory log generation of a stopped process, including generation, PID, UTC exit time, reason, and code metadata.
+- Transactional Linux and Windows release deployment with per-file SHA-256 manifests, isolated health checks, atomic switching, interrupted-operation recovery, and rollback.
+- Real cgroup/PTY integration coverage, LLVM coverage reporting, libFuzzer/AFL++ targets, nightly fuzzing, and expanded lifecycle, dependency, and concurrent-control regressions.
+
+### Changed
+
+- Live log subscriptions wait for the next generation during automatic restart, while `restart --log` binds only after the replacement generation starts.
+- Linux and Windows CLI responses, exit codes, executable/cwd resolution, and lifecycle command policies are aligned.
+- Windows console output is Unicode-safe, local interactive users can access the default control pipe, and remote pipe clients remain rejected.
+- The bundled yaml-cpp dependency is updated to 0.9.0 while preserving offline CMake builds.
+
+### Fixed
+
+- Stop cancels pending restarts, interrupted or stopped processes can be restarted reliably, and stale generations cannot complete newer requests.
+- Windows rejects deletion of a process that is still required by another configured process and keeps log streams isolated across rapid restarts.
+
+[4.1.0]: https://github.com/luoqianlin/pm_tiny/compare/v4.0.0...v4.1.0
+
 ## [4.0.0] - 2026-08-15
 
 ### Added
@@ -72,4 +94,4 @@ First public cross-platform release.
 - Android installation of the ambiguous `pm` client alias.
 
 [2.0.0]: https://github.com/luoqianlin/pm_tiny/releases/tag/v2.0.0
-[3.2.0]: https://github.com/luoqianlin/pm_tiny/compare/v2.0.0...main
+[3.2.0]: https://github.com/luoqianlin/pm_tiny/compare/v2.0.0...v3.2.0

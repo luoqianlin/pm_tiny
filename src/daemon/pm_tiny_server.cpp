@@ -53,9 +53,32 @@ std::string find_env_value(const std::vector<std::string> &environment, const st
     return {};
 }
 
+bool resolve_executable_candidate(const std::string &candidate, std::string &resolved) {
+    char path[PATH_MAX];
+    if (realpath(candidate.c_str(), path) == nullptr) return false;
+    struct stat info{};
+    if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) || access(path, X_OK) != 0) return false;
+    resolved = path;
+    return true;
+}
+
 std::string resolve_executable(const prog_info_t &prog,
                                const std::vector<std::string> &environment) {
-    if (prog.executable.find('/') != std::string::npos) return prog.executable;
+    char cwd_path[PATH_MAX];
+    if (realpath(prog.work_dir.c_str(), cwd_path) == nullptr) return {};
+    struct stat cwd_info{};
+    if (stat(cwd_path, &cwd_info) != 0 || !S_ISDIR(cwd_info.st_mode)) {
+        errno = ENOTDIR;
+        return {};
+    }
+    const std::string cwd(cwd_path);
+    std::string resolved;
+    if (prog.executable.find('/') != std::string::npos) {
+        const auto candidate = !prog.executable.empty() && prog.executable[0] == '/'
+            ? prog.executable : cwd + "/" + prog.executable;
+        return resolve_executable_candidate(candidate, resolved) ? resolved : std::string();
+    }
+    if (resolve_executable_candidate(cwd + "/" + prog.executable, resolved)) return resolved;
     const auto path = find_env_value(environment, "PATH");
     std::size_t begin = 0;
     while (begin <= path.size()) {
@@ -63,9 +86,9 @@ std::string resolve_executable(const prog_info_t &prog,
         const auto directory = path.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
         const auto search_directory = directory.empty() ? std::string(".") : directory;
         const auto base = !search_directory.empty() && search_directory[0] == '/'
-            ? search_directory : prog.work_dir + "/" + search_directory;
+            ? search_directory : cwd + "/" + search_directory;
         const auto candidate = base + "/" + prog.executable;
-        if (access(candidate.c_str(), X_OK) == 0) return candidate;
+        if (resolve_executable_candidate(candidate, resolved)) return resolved;
         if (end == std::string::npos) break;
         begin = end + 1;
     }
@@ -254,17 +277,6 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             PM_TINY_DLOG_ERROR("%s", error_message.c_str());
             return -1;
         }
-        if (prog->executable.find('/') != std::string::npos) {
-            struct stat executable_stat{};
-            std::string executable_path = prog->executable;
-            if (executable_path[0] != '/') executable_path = prog->work_dir + "/" + executable_path;
-            if (stat(executable_path.c_str(), &executable_stat) != 0 || !S_ISREG(executable_stat.st_mode) ||
-                access(executable_path.c_str(), X_OK) != 0) {
-                PM_TINY_DLOG_ERROR("executable preflight failed: %s", executable_path.c_str());
-                errno = ENOENT;
-                return -1;
-            }
-        }
         pm_tiny_progs.push_back(prog);
         dependency_graph_ = std::move(graph);
         dependency_runtime_.migrate(dependency_graph_, runtime_snapshot);
@@ -292,6 +304,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             int ret = spawn_prog(*prog);
             if (ret != -1) {
                 prog->init_prog_log();
+                prog->activate_pending_log_sessions();
             }
             return ret;
         }
@@ -466,23 +479,6 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         ss<<"]";
         PM_TINY_DLOG_DEBUG("start:%s",ss.str().c_str());
         return fail_progs;
-    }
-
-    void pm_tiny_server_t::async_kill_prog(prog_ptr_t&prog_){
-        auto old_state = prog_->state;
-        prog_->async_kill_prog();
-        if (old_state == PM_TINY_PROG_STATE_STARTING) {
-            PM_TINY_DLOG_DEBUG("current prog name:%s,trigger DAG next",prog_->name.c_str());
-            prog_->enqueue_after_termination(
-                    [prog_](pm_tiny_server_t &pm_tiny_server) {
-                        if (pm_tiny_server.is_exiting()) {
-                            return;
-                        }
-                        proglist_t pl;
-                        pl.push_back(prog_);
-                        pm_tiny_server.spawn1(pl);
-                    });
-        }
     }
 
     void pm_tiny_server_t::spawn1(proglist_t &started_progs) {
@@ -889,6 +885,8 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             int rc = pm_tiny::safe_waitpid(p->instance.pid, &wstatus, options);
             if (rc == p->instance.pid) {
                 p->last_wstatus = wstatus;
+                p->has_last_exit = true;
+                p->last_exit_time_unix_ms = pm_tiny::current_unix_time_millis();
                 p->instance.pid = -1;
                 p->state = PM_TINY_PROG_STATE_STOPED;
             } else {

@@ -14,9 +14,12 @@ PM_Tiny 按运行时代码、平台实现、测试职责和部署资产分离目
 | `tests/integration/windows` | Windows named pipe、进程树和 SCM 集成测试 |
 | `tests/fixtures` | 仅供集成测试启动的辅助进程和协议探针 |
 | `tests/data` | Android/Windows 集成测试使用的 YAML 数据 |
+| `tests/fuzz` | 协议、配置/DAG、日志的 libFuzzer/AFL++ adapter、字典与 seed corpus |
 | `examples/config` | 可复制修改的 Linux 和 Windows 配置样例 |
 | `scripts/build` | 明确标注目标平台的构建入口 |
 | `scripts/install` | 系统安装脚本 |
+| `scripts/release` | release manifest 与 Linux/Windows 原子升级回滚事务 |
+| `scripts/test` | LLVM coverage 和 libFuzzer/AFL++ 专项测试入口 |
 | `scripts/windows` | Windows SCM 管理脚本 |
 | `packaging/systemd` | systemd 单元等打包资产 |
 | `toolchains` | 嵌入式 Linux 交叉编译工具链 |
@@ -29,6 +32,10 @@ PM_Tiny 按运行时代码、平台实现、测试职责和部署资产分离目
 - 集成测试数据放入 `tests/data`，不得依赖开发者 home、固定 PID、个人绝对路径或生产 daemon。
 - 标准库 API 示例、临时崩溃程序、手工终端输出实验和未被测试引用的辅助程序不进入仓库。
 - 新增测试时应同时确认 Linux/Android 与 Windows 构建边界，平台专属测试放入对应目录。
+- 生命周期回归应覆盖 `starting`、`online`、`stopped` 的状态迁移，并校验 PID、generation 和无关进程不变。
+- 拒绝配置或依赖变更时，应同时校验退出码、运行时 JSON、依赖图和持久化文件未被部分修改。
+- 并发控制回归允许命令因状态竞争返回约定的失败码，但必须校验 daemon 仍可响应、协议输出可解析且进程列表无损坏。
+- 长耗时综合场景与生命周期、依赖变更场景分别注册到 CTest，并使用 `lifecycle`、`dependency` 等标签支持重复执行。
 
 ## 构建入口
 
@@ -42,6 +49,8 @@ PM_TINY_ANDROID_NDK=/path/to/ndk ./scripts/build/build-android.sh
 
 Windows 仅使用 VS 2022/MSVC x64，具体流程见
 [`windows_port_status.md`](windows_port_status.md)。
+真实 cgroup/PTY/日志轮转、coverage、fuzz 和发布事务见
+[`testing_platform.md`](testing_platform.md)。
 
 ## 日志模块边界
 

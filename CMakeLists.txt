@@ -12,13 +12,17 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
     set(CMAKE_ANDROID_STL_TYPE c++_static CACHE STRING
             "Android C++ runtime linkage" FORCE)
 endif ()
-project(pm_tiny VERSION 4.0.0 LANGUAGES C CXX)
+project(pm_tiny VERSION 4.1.0 LANGUAGES C CXX)
 message(STATUS "PROJECT_VERSION:${PROJECT_VERSION}")
 message(STATUS "CMAKE_SYSTEM_NAME:${CMAKE_SYSTEM_NAME}")
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_INSTALL_PREFIX ${PROJECT_BINARY_DIR}/_install)
 option(PM_TINY_SANITIZER_ENABLE "enable sanitizer" OFF)
+option(PM_TINY_ENABLE_COVERAGE "enable Clang source-based coverage" OFF)
+option(PM_TINY_BUILD_FUZZERS "build protocol/config/log fuzz targets" OFF)
+set(PM_TINY_FUZZ_ENGINE "libfuzzer" CACHE STRING "fuzz engine: libfuzzer or afl")
+set_property(CACHE PM_TINY_FUZZ_ENGINE PROPERTY STRINGS libfuzzer afl)
 option(PM_TINY_UDS_ABSTRACT_NAMESPACE_DEFAULT_ENABLE
         "Enable the use of Unix Domain Socket's abstract namespace by default" OFF)
 option(PM_TINY_BUILD_TESTS "Build pm_tiny tests" ON)
@@ -43,6 +47,28 @@ if (PM_TINY_SANITIZER_ENABLE)
     add_compile_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
     string(APPEND CMAKE_EXE_LINKER_FLAGS " -fsanitize=address -fsanitize=undefined")
 endif ()
+if (PM_TINY_ENABLE_COVERAGE)
+    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "PM_TINY_ENABLE_COVERAGE requires Clang")
+    endif ()
+    add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -fprofile-instr-generate -fcoverage-mapping")
+endif ()
+if (PM_TINY_BUILD_FUZZERS)
+    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "PM_TINY_BUILD_FUZZERS requires Clang or an AFL++ Clang wrapper")
+    endif ()
+    if (NOT PM_TINY_FUZZ_ENGINE STREQUAL "libfuzzer" AND
+        NOT PM_TINY_FUZZ_ENGINE STREQUAL "afl")
+        message(FATAL_ERROR "PM_TINY_FUZZ_ENGINE must be libfuzzer or afl")
+    endif ()
+    if (PM_TINY_FUZZ_ENGINE STREQUAL "libfuzzer")
+        add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
+    else ()
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    endif ()
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -fsanitize=address,undefined")
+endif ()
 message(STATUS "PM_TINY_SANITIZER_ENABLE:${PM_TINY_SANITIZER_ENABLE}")
 
 set(PM_TINY_ON_WINDOWS FALSE)
@@ -51,22 +77,24 @@ if (WIN32)
     message(STATUS "Configuring Windows build path.")
 endif ()
 
-include(FetchContent)
 find_package(Threads REQUIRED)
 
 set(YAML_CPP_LOCAL_DIR "${CMAKE_SOURCE_DIR}/dependencies/yaml-cpp")
-if (EXISTS "${YAML_CPP_LOCAL_DIR}/CMakeLists.txt")
-    message(STATUS "Using bundled yaml-cpp from ${YAML_CPP_LOCAL_DIR}")
-    add_subdirectory("${YAML_CPP_LOCAL_DIR}"
-            "${CMAKE_BINARY_DIR}/_deps/yaml-cpp-build" EXCLUDE_FROM_ALL)
-else ()
-    FetchContent_Declare(yaml-cpp
-            GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-            GIT_TAG yaml-cpp-0.7.0
-            DOWNLOAD_DIR ${CMAKE_HOME_DIRECTORY}/dependencies
-    )
-    FetchContent_MakeAvailable(yaml-cpp)
+if (NOT EXISTS "${YAML_CPP_LOCAL_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "Bundled yaml-cpp 0.9.0 is missing from ${YAML_CPP_LOCAL_DIR}")
 endif ()
+file(READ "${YAML_CPP_LOCAL_DIR}/CMakeLists.txt" YAML_CPP_CMAKE_FILE)
+if (NOT YAML_CPP_CMAKE_FILE MATCHES "project\\(YAML_CPP VERSION 0\\.9\\.0")
+    message(FATAL_ERROR "Bundled yaml-cpp must be version 0.9.0")
+endif ()
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_FORMAT_SOURCE OFF CACHE BOOL "" FORCE)
+message(STATUS "Using bundled yaml-cpp 0.9.0 from ${YAML_CPP_LOCAL_DIR}")
+add_subdirectory("${YAML_CPP_LOCAL_DIR}"
+        "${CMAKE_BINARY_DIR}/_deps/yaml-cpp-build" EXCLUDE_FROM_ALL)
 
 set(ASIO_LOCAL_DIR "${CMAKE_SOURCE_DIR}/dependencies/asio")
 if (NOT EXISTS "${ASIO_LOCAL_DIR}/asio.hpp" OR
@@ -170,7 +198,8 @@ target_include_directories(pm_tiny_cli_connection_error PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
 
 add_library(pm_tiny_cli_command STATIC
-        src/cli/cli_command.cpp)
+        src/cli/cli_command.cpp
+        src/cli/cli_response.cpp)
 target_include_directories(pm_tiny_cli_command PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
@@ -341,6 +370,8 @@ if (PM_TINY_ON_WINDOWS)
         target_link_libraries(dependency_graph_renderer_test PRIVATE pm_tiny_cli_output)
         add_executable(cli_command_test tests/unit/cli_command_test.cpp)
         target_link_libraries(cli_command_test PRIVATE pm_tiny_cli_command)
+        add_executable(cli_response_test tests/unit/cli_response_test.cpp)
+        target_link_libraries(cli_response_test PRIVATE pm_tiny_cli_command)
         add_executable(prog_cfg_order_test tests/unit/prog_cfg_order_test.cpp)
         target_link_libraries(prog_cfg_order_test PRIVATE pm_tiny_dependency_graph pm_tiny_program_name)
         target_include_directories(prog_cfg_order_test PRIVATE
@@ -416,6 +447,9 @@ if (PM_TINY_BUILD_TESTS)
 elseif ("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
     add_executable(pm_sdk_ready_tick_probe EXCLUDE_FROM_ALL tests/fixtures/sdk_ready_tick_probe.cpp)
 endif ()
+if (PM_TINY_BUILD_FUZZERS)
+    add_subdirectory(tests/fuzz)
+endif ()
 if (TARGET pm_sdk_ready_tick_probe)
 target_include_directories(pm_sdk_ready_tick_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
 target_link_libraries(pm_sdk_ready_tick_probe PRIVATE pm_sdk)
@@ -426,6 +460,7 @@ if (PM_TINY_BUILD_TESTS)
         add_test(NAME connection_error_test COMMAND connection_error_test)
         add_test(NAME dependency_graph_renderer_test COMMAND dependency_graph_renderer_test)
         add_test(NAME cli_command_test COMMAND cli_command_test)
+        add_test(NAME cli_response_test COMMAND cli_response_test)
         add_test(NAME prog_cfg_order_test COMMAND prog_cfg_order_test)
         add_test(NAME control_command_test COMMAND control_command_test)
         add_test(NAME restart_policy_test COMMAND restart_policy_test)
@@ -437,17 +472,28 @@ if (PM_TINY_BUILD_TESTS)
         add_test(NAME program_log_test COMMAND program_log_test)
         add_test(NAME daemon_log_test COMMAND daemon_log_test)
         add_test(NAME daemon_info_test COMMAND daemon_info_test)
-        add_test(NAME windows_protocol_integration
-                COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-                -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/windows/windows_protocol_integration.ps1
-                -Daemon $<TARGET_FILE:pm_tiny>
-                -Cli $<TARGET_FILE:pm>
-                -SdkProbe $<TARGET_FILE:pm_sdk_ready_tick_probe>
-                -ProtocolProbe $<TARGET_FILE:windows_protocol_probe>
-                -TreeFixture $<TARGET_FILE:windows_process_tree_fixture>
-                -SourceDir ${CMAKE_CURRENT_SOURCE_DIR}
-                -ArtifactsDir ${CMAKE_BINARY_DIR}/test-artifacts/windows)
-        set_tests_properties(windows_protocol_integration PROPERTIES TIMEOUT 240)
+        function(pm_tiny_add_windows_protocol_test test_name scenario artifacts timeout labels)
+            add_test(NAME ${test_name}
+                    COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/windows/windows_protocol_integration.ps1
+                    -Daemon $<TARGET_FILE:pm_tiny>
+                    -Cli $<TARGET_FILE:pm>
+                    -SdkProbe $<TARGET_FILE:pm_sdk_ready_tick_probe>
+                    -ProtocolProbe $<TARGET_FILE:windows_protocol_probe>
+                    -TreeFixture $<TARGET_FILE:windows_process_tree_fixture>
+                    -SourceDir ${CMAKE_CURRENT_SOURCE_DIR}
+                    -ArtifactsDir ${CMAKE_BINARY_DIR}/test-artifacts/${artifacts}
+                    -Scenario ${scenario})
+            set_tests_properties(${test_name} PROPERTIES TIMEOUT ${timeout} LABELS "${labels}")
+        endfunction()
+        pm_tiny_add_windows_protocol_test(windows_protocol_integration core windows 240
+                "integration;windows;protocol")
+        pm_tiny_add_windows_protocol_test(windows_lifecycle_transition_integration
+                lifecycle-transitions windows-lifecycle 60 "integration;windows;lifecycle")
+        pm_tiny_add_windows_protocol_test(windows_dependency_mutation_integration
+                dependency-mutations windows-dependency 60 "integration;windows;dependency")
+        pm_tiny_add_windows_protocol_test(windows_concurrent_control_integration
+                concurrent-controls windows-concurrent 90 "integration;windows;concurrency")
         if (MSVC)
             add_test(NAME windows_service_integration
                     COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
@@ -458,6 +504,15 @@ if (PM_TINY_BUILD_TESTS)
                     -SourceDir ${CMAKE_CURRENT_SOURCE_DIR}
                     -ArtifactsDir ${CMAKE_BINARY_DIR}/test-artifacts/windows-service)
             set_tests_properties(windows_service_integration PROPERTIES TIMEOUT 120)
+            add_test(NAME windows_release_transaction_integration
+                    COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/windows/windows_release_transaction_integration.ps1
+                    -Daemon $<TARGET_FILE:pm_tiny>
+                    -Client $<TARGET_FILE:pm>
+                    -SourceDir ${CMAKE_CURRENT_SOURCE_DIR}
+                    -ArtifactsDir ${CMAKE_BINARY_DIR}/test-artifacts/windows-release)
+            set_tests_properties(windows_release_transaction_integration PROPERTIES
+                    TIMEOUT 240 LABELS "integration;windows;install;upgrade;rollback")
         endif ()
     else ()
         enable_testing()

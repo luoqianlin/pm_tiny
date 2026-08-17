@@ -48,6 +48,8 @@ struct ProcessHandle {
     unsigned long root_exit_code = STILL_ACTIVE;
     bool has_last_exit = false;
     unsigned long last_exit_code = 0;
+    std::int64_t last_exit_time_unix_ms = 0;
+    unsigned long last_pid = 0;
     std::int32_t restart_count = 0;
     termination_job termination;
     CompletionAction completion_action = CompletionAction::automatic;
@@ -79,6 +81,10 @@ struct RuntimeControlState {
 bool rebuild_dependencies(RuntimeControlState &state,
                           const std::vector<ProgramConfig> &configs,
                           std::string &error_message);
+bool build_dependencies(const std::vector<ProgramConfig> &configs,
+                        dependency_graph &graph,
+                        std::string &error_message);
+void replace_dependencies(RuntimeControlState &state, dependency_graph graph);
 void ensure_process_records(std::vector<ProcessHandle> &processes,
                             const std::vector<ProgramConfig> &configs);
 std::vector<std::string> schedule_dependency_launch(std::vector<ProcessHandle> &processes,

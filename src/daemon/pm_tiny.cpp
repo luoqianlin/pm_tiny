@@ -154,6 +154,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                     auto life_time = now_ms - p->last_startup_ms;
                     p->last_wstatus = wstatus;
                     p->has_last_exit = true;
+                    p->last_exit_time_unix_ms = pm_tiny::current_unix_time_millis();
                     p->close_fds(tiny_server.lmkdFd);
                     const bool tree_empty = p->is_tree_empty();
                     if (!tree_empty) {
@@ -245,6 +246,7 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
             prog->restart_due_ms = 0;
             if (ret == -1) {
                 PM_TINY_DLOG_ERROR_ERRNO("scheduled restart `%s` failed", prog->name.c_str());
+                prog->fail_pending_log_sessions("failed to start the next generation");
                 tiny_server.flag_startup_fail(prog);
             }
             continue;
@@ -523,6 +525,9 @@ void start(pm_tiny_server_t &pm_tiny_server) {
     }
     int sock_fd = open_uds_listen_fd(sock_path,
                                      pm_tiny_server.uds_abstract_namespace);
+    if (sock_fd < 0) {
+        std::exit(EXIT_FAILURE);
+    }
     rc = pm_tiny_server.parse_cfg();
     if (rc != 0) {
         exit(EXIT_FAILURE);

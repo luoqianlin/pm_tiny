@@ -1,0 +1,47 @@
+name: fuzz-nightly
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  libfuzzer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run nightly libFuzzer targets
+        env:
+          PM_TINY_FUZZ_DURATION: "600"
+          PM_TINY_FUZZ_ARTIFACT_DIR: ${{ github.workspace }}/build/test-artifacts/fuzz/libfuzzer-nightly
+          PM_TINY_BUILD_JOBS: "2"
+        run: bash scripts/test/fuzz.sh nightly libfuzzer
+      - name: Upload corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libfuzzer-nightly
+          path: build/test-artifacts/fuzz/libfuzzer-nightly
+          if-no-files-found: warn
+          retention-days: 30
+
+  afl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install AFL++
+        run: sudo apt-get update && sudo apt-get install -y afl++
+      - name: Run nightly AFL++ targets
+        env:
+          PM_TINY_FUZZ_DURATION: "600"
+          PM_TINY_FUZZ_ARTIFACT_DIR: ${{ github.workspace }}/build/test-artifacts/fuzz/afl-nightly
+          PM_TINY_BUILD_JOBS: "2"
+        run: bash scripts/test/fuzz.sh nightly afl
+      - name: Upload corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: afl-nightly
+          path: build/test-artifacts/fuzz/afl-nightly
+          if-no-files-found: warn
+          retention-days: 30

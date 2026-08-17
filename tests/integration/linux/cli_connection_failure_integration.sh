@@ -148,6 +148,24 @@ python3 -c 'import socket,sys; sock=socket.socket(socket.AF_UNIX); sock.bind(sys
 expect_connect_failure stale_file_socket "$stale_socket" 0 \
     "$stale_socket" 'unix socket (filesystem)'
 
+printf -v long_socket_suffix '%*s' 120 ''
+long_socket="$TMP/${long_socket_suffix// /x}"
+set +e
+PM_TINY_HOME="$TMP/home" PM_TINY_SOCK_FILE="$long_socket" \
+PM_TINY_UDS_ABSTRACT_NAMESPACE=0 PM_TINY_PROG_CFG_FILE="$TMP/prog.yaml" \
+    "$BIN/pm_tiny" -c "$TMP/pm_tiny.yaml" >"$TMP/long-socket-daemon.out" 2>&1
+long_socket_status=$?
+set -e
+if [[ $long_socket_status -ne 1 ]]; then
+    echo "long socket: expected clean exit status 1, got $long_socket_status" >&2
+    exit 1
+fi
+grep -q 'Unix socket address is too long' "$TMP/long-socket-daemon.out"
+if grep -q 'terminate called' "$TMP/long-socket-daemon.out"; then
+    echo "long socket: daemon terminated through an uncaught exception" >&2
+    exit 1
+fi
+
 abstract_socket="pm_tiny_cli_failure_$$"
 start_daemon abstract "$abstract_socket" 1
 expect_connect_failure abstract_daemon_file_client "$abstract_socket" 0 \

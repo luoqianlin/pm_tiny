@@ -22,6 +22,8 @@ std::wstring control_pipe_name_wide();
 
 std::wstring utf8_to_wide(const std::string &text);
 std::string wide_to_utf8(const std::wstring &text);
+void write_stdout_utf8(const std::string &text);
+void write_stderr_utf8(const std::string &text);
 
 } // namespace win
 } // namespace pm_tiny

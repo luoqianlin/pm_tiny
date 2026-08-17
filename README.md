@@ -75,7 +75,7 @@ Android 构建固定静态链接 libc++，产物不依赖 `libc++_shared.so`。
 | `pm start <name> [options] -- <executable> [args...]` | 三平台动态增加并启动运行时定义。 |
 | `pm start <name>` | 启动已配置进程及其依赖闭包。 |
 | `pm stop\|restart\|delete <name>` | 停止、重启或删除进程。 |
-| `pm log\|inspect <name>` | 查看实时日志或进程配置与运行信息。 |
+| `pm log <name> [--history]` / `pm inspect <name>` | 跟随运行中进程日志，或查看已停止进程最后一代缓存；检查配置与运行信息。 |
 | `pm info [--json]` | 查看 daemon 生效配置及来源、运行模式、平台能力和健康状态。 |
 | `pm save` / `pm reload` | 持久化当前配置或重新加载配置文件。 |
 | `pm quit` / `pm version` | 退出守护进程或查看版本。 |
@@ -139,6 +139,7 @@ cmake --install build
 - [Daemon 参数、环境变量与目录](docs/daemon_configuration.md)
 - [Windows 移植状态与限制](docs/windows_port_status.md)
 - [项目目录结构与测试约定](docs/project_structure.md)
+- [测试平台：真实 cgroup/PTY、coverage、fuzz 与升级回滚](docs/testing_platform.md)
 - [项目定位、竞品分析与路线图](docs/project_roadmap.md)
 - [基准与同类项目对比](docs/benchmark.md)
 - [变更记录](CHANGELOG.md)

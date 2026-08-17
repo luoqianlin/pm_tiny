@@ -122,8 +122,15 @@ int run_fragmented() {
     CloseHandle(pipe);
     std::int32_t status = -1;
     std::string text;
+    std::string version;
+    try {
+        pm_tiny::iframe_stream stream(response.payload);
+        stream >> status >> text >> version;
+    } catch (...) {
+        return 4;
+    }
     if (!read || response.type != 0x29 || response.request_id != 0x10203040 ||
-        !response_status(response, status, text) || status != 0 || text.find("Windows v3") == std::string::npos) {
+        status != 0 || version != "4.1.0") {
         return 4;
     }
     return 0;

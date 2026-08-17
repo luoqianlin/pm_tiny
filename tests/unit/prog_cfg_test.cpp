@@ -197,6 +197,34 @@ void test_missing_and_contentless_configs_are_empty() {
     unlink((base + ".yaml").c_str());
 }
 
+void test_yaml_parser_regressions() {
+    const std::string base = "/tmp/pm_tiny_prog_cfg_yaml_parser_" +
+                             std::to_string(static_cast<long long>(getpid()));
+    const std::string cfg_path = base + ".yaml";
+
+    {
+        std::ofstream config(cfg_path, std::ios::binary | std::ios::trunc);
+        config << "- name: cr-only\r"
+                  "  cwd: /tmp\r"
+                  "  executable: /bin/true\r";
+    }
+    const auto cr_only = pm_tiny::load_prog_cfg(cfg_path, base + ".env");
+    expect(cr_only.success && cr_only.programs.size() == 1 &&
+           cr_only.programs.front().name == "cr-only",
+           "CR-only YAML config should load");
+
+    {
+        std::ofstream config(cfg_path, std::ios::binary | std::ios::trunc);
+        config << "- name: \"broken\" \"suffix\"\n"
+                  "  cwd: /tmp\n"
+                  "  executable: /bin/true\n";
+    }
+    const auto adjacent_scalars = pm_tiny::load_prog_cfg(cfg_path, base + ".env");
+    expect(!adjacent_scalars.success && !adjacent_scalars.error.empty(),
+           "adjacent quoted YAML scalars must fail");
+    unlink(cfg_path.c_str());
+}
+
 void test_environment_stage_failure_preserves_config() {
     const std::string base = "/tmp/pm_tiny_prog_cfg_fail_" +
                              std::to_string(static_cast<long long>(getpid()));
@@ -418,6 +446,7 @@ int main() {
     test_cycle_detection();
     test_save_load_round_trip();
     test_missing_and_contentless_configs_are_empty();
+    test_yaml_parser_regressions();
     test_environment_stage_failure_preserves_config();
     test_interrupted_save_recovery();
     test_invalid_entry_rejects_entire_document();

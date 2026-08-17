@@ -8,7 +8,7 @@ param(
     [ValidateSet("Automatic", "Manual", "Disabled")][string]$StartupType = "Automatic",
     [string]$HomePath = (Join-Path $env:ProgramData "pm_tiny"),
     [string]$PipeName = "\\.\pipe\pm_tiny",
-    [string]$PipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)",
+    [string]$PipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)",
     [switch]$Start
 )
 

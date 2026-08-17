@@ -136,11 +136,11 @@ std::string render_daemon_info(const daemon_info_snapshot &s, bool as_json) {
     out << "\nIPC\n  endpoint: " << (s.platform == daemon_info_platform::windows_os ? s.named_pipe : s.uds_address)
         << "\n\nLogging\n  sink: " << daemon_log_sink_name(s.log_sink)
         << "\n  console_mirror: " << bool_text(s.log_console_mirror)
-        << "\n  degraded: " << bool_text(s.log_degraded)
+        << "\n  log_degraded: " << bool_text(s.log_degraded)
         << "\n  last_error: " << (s.log_last_error.empty() ? "-" : s.log_last_error)
         << "\n\nProcess tree\n  effective_mode: " << s.effective_process_tree_mode
         << "\n  subreaper_enabled: " << bool_text(s.subreaper_enabled)
-        << "\n  degraded: " << bool_text(s.process_tree_degraded)
+        << "\n  process_tree_degraded: " << bool_text(s.process_tree_degraded)
         << "\n  degradation_reason: " << (s.process_tree_degradation_reason.empty() ? "-" : s.process_tree_degradation_reason)
         << "\n\nCapabilities\n"
         << "  dynamic_create: " << bool_text(s.dynamic_create) << '\n'

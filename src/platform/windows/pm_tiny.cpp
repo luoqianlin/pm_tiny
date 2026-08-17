@@ -246,7 +246,7 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                             *iter, pm_tiny::win::CompletionAction::remove, 0, error)) {
                         log_error("Failed to stop `" + iter->config.name + "`: " + error);
                     } else if (!error.empty()) {
-                        std::cerr << "[WARN] " << iter->config.name << ": " << error << std::endl;
+                        pm_tiny::win::write_stderr_utf8("[WARN] " + iter->config.name + ": " + error + "\n");
                     }
                 }
             }
@@ -298,7 +298,7 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                             proc, pm_tiny::win::CompletionAction::automatic, 1, terminate_error)) {
                         log_error(terminate_error);
                     } else if (!terminate_error.empty()) {
-                        std::cerr << "[WARN] " << proc.config.name << ": " << terminate_error << std::endl;
+                        pm_tiny::win::write_stderr_utf8("[WARN] " + proc.config.name + ": " + terminate_error + "\n");
                     }
                     if (start_timed_out) runtime_state.dependencies.mark_failed(proc.config.name);
                 }
@@ -315,9 +315,10 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                 if ((phase_before_poll == pm_tiny::termination_phase::term_requested ||
                      phase_before_poll == pm_tiny::termination_phase::tree_draining) &&
                     proc.termination.phase() == pm_tiny::termination_phase::force_kill_requested) {
-                    std::cerr << "[WARN] Program `" << proc.config.name << "` generation "
-                              << proc.generation << " exceeded kill_timeout; forced Job Object termination."
-                              << std::endl;
+                    pm_tiny::win::write_stderr_utf8(
+                        "[WARN] Program `" + proc.config.name + "` generation " +
+                        std::to_string(proc.generation) +
+                        " exceeded kill_timeout; forced Job Object termination.\n");
                 }
                 if (!root_active && !tree_empty && proc.termination.phase() == pm_tiny::termination_phase::none) {
                     std::string terminate_error;
@@ -396,12 +397,6 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                     } else if (completion_action == pm_tiny::win::CompletionAction::delete_config) {
                         config_map.erase(completed_name);
                         it = processes.erase(it);
-                        std::vector<pm_tiny::win::ProgramConfig> remaining;
-                        remaining.reserve(processes.size());
-                        for (const auto &record : processes) remaining.push_back(record.config);
-                        std::string rebuild_error;
-                        if (!pm_tiny::win::rebuild_dependencies(runtime_state, remaining, rebuild_error))
-                            log_error(rebuild_error);
                     } else {
                         ++it;
                     }
@@ -466,24 +461,26 @@ int wmain(int argc, wchar_t *argv[]) {
     try {
         for (int i = 0; i < argc; ++i) arguments.push_back(pm_tiny::win::wide_to_utf8(argv[i]));
     } catch (const std::exception &ex) {
-        std::cerr << "pm_tiny: invalid command line: " << ex.what() << std::endl;
+        pm_tiny::win::write_stderr_utf8("pm_tiny: invalid command line: " + std::string(ex.what()) + "\n");
         return 2;
     }
     const auto parsed = pm_tiny::parse_daemon_arguments(arguments, pm_tiny::daemon_platform::windows);
     if (!parsed.success) {
-        std::cerr << "pm_tiny: " << parsed.error << "\n\n"
-                  << pm_tiny::daemon_usage(arguments.empty() ? "pm_tiny" : arguments[0],
-                                           pm_tiny::daemon_platform::windows);
+        pm_tiny::win::write_stderr_utf8(
+            "pm_tiny: " + parsed.error + "\n\n" +
+            pm_tiny::daemon_usage(arguments.empty() ? "pm_tiny" : arguments[0],
+                                  pm_tiny::daemon_platform::windows));
         return 2;
     }
     g_options = parsed.options;
     if (g_options.help) {
-        std::cout << pm_tiny::daemon_usage(arguments.empty() ? "pm_tiny" : arguments[0],
-                                           pm_tiny::daemon_platform::windows);
+        pm_tiny::win::write_stdout_utf8(
+            pm_tiny::daemon_usage(arguments.empty() ? "pm_tiny" : arguments[0],
+                                  pm_tiny::daemon_platform::windows));
         return EXIT_SUCCESS;
     }
     if (g_options.version) {
-        std::cout << "pm_tiny " << PM_TINY_VERSION << std::endl;
+        pm_tiny::win::write_stdout_utf8("pm_tiny " PM_TINY_VERSION "\n");
         return EXIT_SUCCESS;
     }
     if (g_options.service) {

@@ -63,6 +63,9 @@ std::string temporary_directory() {
 }
 
 void test_argument_parser() {
+    const pm_tiny::daemon_config defaults;
+    expect(defaults.pipe_sddl == pm_tiny::windows_default_pipe_sddl,
+           "Windows default pipe SDDL changed unexpectedly");
     const auto parsed = pm_tiny::parse_daemon_arguments(
         {"pm_tiny", "--home", "custom", "--log-level", "debug",
          "--log-max-size-kb", "128", "--log-archive-count", "2", "--daemon"},
@@ -118,6 +121,7 @@ void test_precedence_and_paths() {
     expect(result.config.log_file == directory + "/env.log", "environment log path did not win");
     expect(result.config.log_level == "debug", "CLI log level did not win");
     expect(result.config.pipe_name == "pipe-from-cli", "CLI pipe did not win");
+    expect(result.config.pipe_sddl == "test-sddl", "explicit pipe SDDL was not preserved");
     expect(result.config.source_of("config_path") == pm_tiny::daemon_config_source::command_line,
            "config path source is wrong");
     expect(result.config.source_of("home_dir") == pm_tiny::daemon_config_source::command_line,

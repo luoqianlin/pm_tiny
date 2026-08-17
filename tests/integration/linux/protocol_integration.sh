@@ -68,6 +68,12 @@ set -e
 signal_mask_after=$(awk '/^SigBlk:/ {print $2}' "/proc/$DAEMON_PID/status")
 [[ "$signal_mask_after" == "$signal_mask_before" ]]
 
+"$BIN/pm" start relative_exec --no-daemon --cwd /tmp -- ../bin/sleep 30 >/dev/null
+relative_exec_inspect=$("$BIN/pm" inspect relative_exec)
+[[ "$relative_exec_inspect" == *"/bin/sleep"* ]]
+"$BIN/pm" stop relative_exec --no-list >/dev/null
+"$BIN/pm" delete relative_exec --no-list >/dev/null
+
 if id nobody >/dev/null 2>&1 && [[ $(id -u nobody) != "$(id -u)" ]]; then
     set +e
     "$BIN/pm" start forbidden_identity --user nobody -- /bin/true \
@@ -82,7 +88,7 @@ fi
 INNOCENT_PID=$!
 "$BIN/pm" start ownership_probe --no-daemon --no-pty -- /usr/bin/sleep 30 >/dev/null
 kill -0 "$INNOCENT_PID"
-"$BIN/pm" delete ownership_probe >/dev/null
+"$BIN/pm" delete ownership_probe --no-list >/dev/null
 kill -0 "$INNOCENT_PID"
 kill "$INNOCENT_PID"
 wait "$INNOCENT_PID" 2>/dev/null || true
@@ -139,11 +145,20 @@ for _ in $(seq 1 100); do
 done
 (( current_fds <= baseline_fds + 2 ))
 }
+wait_for_control_recovery() {
+for _ in $(seq 1 100); do
+    "$BIN/pm" --version >/dev/null 2>&1 && return 0
+    sleep .02
+done
+return 1
+}
 run_connection_churn
 wait_for_fd_recovery
+wait_for_control_recovery
 warmed_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$DAEMON_PID/status")
 run_connection_churn
 wait_for_fd_recovery
+wait_for_control_recovery
 current_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$DAEMON_PID/status")
 if [[ "${PM_TINY_TEST_SANITIZED:-0}" != 1 ]]; then
     (( current_rss <= warmed_rss + 4096 ))
@@ -169,10 +184,38 @@ if data:
 PY
     grep -q 'reject control connection.*uid=' "$TMP/pm.log"
 fi
+wait_for_control_recovery
 
-"$BIN/pm" --version | grep -q 'pm_tiny: 4.0.0'
+"$BIN/pm" --version | grep -q 'pm_tiny: 4.1.0'
 "$BIN/pm" ls | grep -q 'Total: 0'
 "$BIN/pm" ls --json | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data == {"schema_version": 5, "total": 0, "processes": []}'
+mkdir -p "$TMP/yaml-cwd"
+cat > "$TMP/yaml-cwd/runner" <<'EOF'
+#!/bin/sh
+sleep "$1"
+EOF
+chmod +x "$TMP/yaml-cwd/runner"
+cat > "$TMP/prog.yaml" <<EOF
+- name: yaml_relative
+  executable: ./runner
+  args: ["30"]
+  cwd: $TMP/yaml-cwd
+  daemon: false
+- name: yaml_path
+  executable: sleep
+  args: ["30"]
+  cwd: $TMP/yaml-cwd
+  daemon: false
+EOF
+[[ -z "$("$BIN/pm" reload --no-list)" ]]
+grep -q './runner' <<< "$("$BIN/pm" inspect yaml_relative)"
+grep -q 'executable.*sleep' <<< "$("$BIN/pm" inspect yaml_path)"
+"$BIN/pm" stop yaml_relative --no-list >/dev/null
+"$BIN/pm" stop yaml_path --no-list >/dev/null
+"$BIN/pm" delete yaml_relative --no-list >/dev/null
+"$BIN/pm" delete yaml_path --no-list >/dev/null
+"$BIN/pm" save >/dev/null
+grep -qxF '[]' "$TMP/prog.yaml"
 "$BIN/pm" save > "$TMP/save.out" &
 SAVE_PID=$!
 sleep .05
@@ -182,7 +225,7 @@ if "$BIN/pm" save > "$TMP/save-busy.out" 2>&1; then
 fi
 grep -q 'persistence operation busy' "$TMP/save-busy.out"
 wait "$SAVE_PID"
-grep -q 'Success' "$TMP/save.out"
+[[ ! -s "$TMP/save.out" ]]
 grep -qxF '[]' "$TMP/prog.yaml"
 "$BIN/pm" reload | grep -q 'Total: 0'
 
@@ -194,7 +237,7 @@ grep -q 'log_mode: split' "$TMP/prog.yaml"
 grep -q 'log_archive_count: 3' "$TMP/prog.yaml"
 [[ -f "$TMP/environ/persisted.yaml" ]]
 grep -q '^schema: 1$' "$TMP/environ/persisted.yaml"
-"$BIN/pm" stop persisted >/dev/null
+"$BIN/pm" stop persisted --no-list >/dev/null
 "$BIN/pm" quit >/dev/null
 wait "$DAEMON_PID"
 "$BIN/pm_tiny" -c "$TMP/pm_tiny.yaml" > "$TMP/restart.out" 2>&1 &
@@ -207,7 +250,7 @@ done
 sleep .2
 "$BIN/pm" ls >/dev/null
 "$BIN/pm" ls | grep persisted
-"$BIN/pm" delete persisted >/dev/null
+"$BIN/pm" delete persisted --no-list >/dev/null
 "$BIN/pm" save >/dev/null
 
 "$BIN/pm" start app --no-daemon -- /usr/bin/sleep 5 | grep -q started
@@ -218,9 +261,9 @@ grep -q 'config_source.*runtime' <<< "$APP_INSPECT"
 grep -q 'log_mode.*split' <<< "$APP_INSPECT"
 grep -q 'log_degraded.*N' <<< "$APP_INSPECT"
 grep -Eq 'process_tree_backend.*(process_group|cgroup)' <<< "$APP_INSPECT"
-"$BIN/pm" restart app | grep -q Success
-"$BIN/pm" stop app | grep -q Success
-"$BIN/pm" delete app | grep -q Success
+"$BIN/pm" restart app --no-list >/dev/null
+"$BIN/pm" stop app --no-list >/dev/null
+"$BIN/pm" delete app --no-list >/dev/null
 
 "$BIN/pm" start generation_app --no-daemon --no-pty -- /usr/bin/sleep 30 >/dev/null
 for _ in $(seq 1 20); do
@@ -251,30 +294,96 @@ if "$BIN/pm" list --wide --json >/dev/null 2>&1; then
     exit 1
 fi
 for _ in $(seq 1 10); do
-    "$BIN/pm" restart generation_app >/dev/null
+    "$BIN/pm" restart generation_app --no-list >/dev/null
 done
 "$BIN/pm" ls | grep generation_app | grep -q online
-"$BIN/pm" delete generation_app >/dev/null
+"$BIN/pm" delete generation_app --no-list >/dev/null
 
-"$BIN/pm" start logapp --no-daemon --log -- /usr/bin/printf integration > "$TMP/log.out"
+"$BIN/pm" start logapp --no-daemon --log -- /bin/sh -c 'printf integration; sleep 5' > "$TMP/log.out"
 grep -q integration "$TMP/log.out"
-grep -q 'PM_TINY MESSAGE' "$TMP/log.out"
-"$BIN/pm" delete logapp >/dev/null
+grep -q '\[pm_tiny\] process `logapp` exited:' "$TMP/log.out"
+"$BIN/pm" delete logapp --no-list >/dev/null
+
+"$BIN/pm" start log_history --no-daemon -- /usr/bin/printf history-marker >/dev/null
+for _ in $(seq 1 100); do
+    "$BIN/pm" ls --json | grep -q '"name":"log_history".*"state":"stopped"' && break
+    sleep .05
+done
+if "$BIN/pm" log log_history >"$TMP/log-history-live.out" 2>"$TMP/log-history-live.err"; then
+    echo "plain pm log unexpectedly accepted a stopped process" >&2
+    exit 1
+fi
+[[ ! -s "$TMP/log-history-live.out" ]]
+grep -q -- '--history' "$TMP/log-history-live.err"
+"$BIN/pm" log log_history --history >"$TMP/log-history.out"
+head -1 "$TMP/log-history.out" | grep -q 'showing cached log for stopped process `log_history`'
+grep -q history-marker "$TMP/log-history.out"
+! grep -q 'process `log_history` exited' "$TMP/log-history.out"
+"$BIN/pm" log log_history --history >"$TMP/log-history-second.out"
+cmp "$TMP/log-history.out" "$TMP/log-history-second.out"
+"$BIN/pm" delete log_history --no-list >/dev/null
+
+cat >"$TMP/restart-generation.sh" <<'SH'
+#!/bin/sh
+counter_file="$1"
+generation=$(($(cat "$counter_file" 2>/dev/null || echo 0) + 1))
+printf '%s\n' "$generation" >"$counter_file"
+printf 'GENERATION_%s\n' "$generation"
+if [ "$generation" -eq 1 ]; then sleep 30; else sleep .1; fi
+SH
+chmod +x "$TMP/restart-generation.sh"
+"$BIN/pm" start restart_log_generation --no-daemon -- "$TMP/restart-generation.sh" \
+    "$TMP/restart-generation.count" >/dev/null
+for _ in $(seq 1 100); do [[ -f "$TMP/restart-generation.count" ]] && break; sleep .05; done
+"$BIN/pm" restart restart_log_generation --log >"$TMP/restart-generation.out"
+grep -q GENERATION_2 "$TMP/restart-generation.out"
+! grep -q GENERATION_1 "$TMP/restart-generation.out"
+grep -q 'process `restart_log_generation` exited:' "$TMP/restart-generation.out"
+"$BIN/pm" delete restart_log_generation --no-list >/dev/null
+
+cat >"$TMP/automatic-log-generation.sh" <<'SH'
+#!/bin/sh
+counter_file="$1"
+generation=$(($(cat "$counter_file" 2>/dev/null || echo 0) + 1))
+printf '%s\n' "$generation" >"$counter_file"
+printf 'AUTOMATIC_GENERATION_%s\n' "$generation"
+sleep .1
+SH
+chmod +x "$TMP/automatic-log-generation.sh"
+"$BIN/pm" start automatic_log_wait --restart-delay-ms 1500 --restart-max-delay-ms 1500 -- \
+    "$TMP/automatic-log-generation.sh" "$TMP/automatic-log-generation.count" >/dev/null
+automatic_log_pending=no
+for _ in $(seq 1 100); do
+    automatic_log_status=$("$BIN/pm" ls --json)
+    automatic_log_pending=$(python3 -c '
+import json, sys
+item = next(item for item in json.load(sys.stdin)["processes"] if item["name"] == "automatic_log_wait")
+print("yes" if item["restart_pending"] and item["pid"] is None else "no")
+' <<< "$automatic_log_status")
+    [[ "$automatic_log_pending" == yes ]] && break
+    sleep .05
+done
+[[ "$automatic_log_pending" == yes ]]
+timeout --kill-after=1s 10s "$BIN/pm" log automatic_log_wait >"$TMP/automatic-log-wait.out"
+grep -q AUTOMATIC_GENERATION_2 "$TMP/automatic-log-wait.out"
+! grep -q AUTOMATIC_GENERATION_1 "$TMP/automatic-log-wait.out"
+grep -q 'process `automatic_log_wait` exited:' "$TMP/automatic-log-wait.out"
+"$BIN/pm" delete automatic_log_wait --no-list >/dev/null
 
 "$BIN/pm" start log_delete --no-daemon --kill-timeout 1 -- /usr/bin/sleep 30 >/dev/null
 timeout --kill-after=1s 5s "$BIN/pm" log log_delete > "$TMP/log-delete.out" &
 LOG_DELETE_PID=$!
 sleep .2
-"$BIN/pm" delete log_delete >/dev/null
+"$BIN/pm" delete log_delete --no-list >/dev/null
 wait "$LOG_DELETE_PID"
-grep -q 'PM_TINY MESSAGE' "$TMP/log-delete.out"
+grep -q '\[pm_tiny\] process `log_delete` exited:' "$TMP/log-delete.out"
 wait_for_fd_recovery
 
 "$BIN/pm" start combined_log --no-daemon --log-mode combined -- /usr/bin/printf combined-marker >/dev/null
 for _ in $(seq 1 20); do [[ -f "$TMP/logs/combined_log.log" ]] && break; sleep .05; done
 grep -q combined-marker "$TMP/logs/combined_log.log"
 [[ ! -e "$TMP/logs/combined_log_stdout.log" ]]
-"$BIN/pm" delete combined_log >/dev/null
+"$BIN/pm" delete combined_log --no-list >/dev/null
 
 printf 'not-a-directory\n' > "$TMP/bad-log-parent"
 "$BIN/pm" start log_degrade --no-daemon --log-dir "$TMP/bad-log-parent/child" -- \
@@ -293,7 +402,7 @@ for _ in $(seq 1 50); do
 done
 grep -q second "$TMP/bad-log-parent/child/log_degrade_stdout.log"
 "$BIN/pm" inspect log_degrade | grep -q 'log_degraded.*N'
-"$BIN/pm" delete log_degrade >/dev/null
+"$BIN/pm" delete log_degrade --no-list >/dev/null
 
 "$BIN/pm" start log_interrupt --no-daemon -- /usr/bin/sleep 30 >/dev/null
 "$BIN/pm" start log_interrupt_busy --no-daemon -- /usr/bin/yes >/dev/null
@@ -330,8 +439,8 @@ interrupt_log() {
 interrupt_log log_interrupt "$tmp_dir/log-interrupt.out"
 interrupt_log log_interrupt_busy /dev/null
 ' bash "$BIN/pm" "$TMP"
-"$BIN/pm" delete log_interrupt >/dev/null
-"$BIN/pm" delete log_interrupt_busy >/dev/null
+"$BIN/pm" delete log_interrupt --no-list >/dev/null
+"$BIN/pm" delete log_interrupt_busy --no-list >/dev/null
 
 python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(b"BAD!"); s.close()' "$TMP/pm.sock"
 "$BIN/pm" ls | grep -q 'Total: 0'
@@ -363,7 +472,7 @@ for _ in $(seq 1 20); do
     sleep .05
 done
 grep -q 'reject `sdkapp` tick.*peer is not in current process tree' "$TMP/pm.log"
-"$BIN/pm" stop sdkapp >/dev/null
+"$BIN/pm" stop sdkapp --no-list >/dev/null
 
 set +e
 MISSING_INSPECT=$("$BIN/pm" inspect missing 2>&1)
@@ -400,7 +509,7 @@ sleep 2
 "$BIN/pm" ls | grep abstract_sdk | grep -q online
 grep -q 'app `abstract_sdk` ready' "$TMP/pm.log"
 grep -q 'recv `abstract_sdk` tick' "$TMP/pm.log"
-"$BIN/pm" stop abstract_sdk >/dev/null
+"$BIN/pm" stop abstract_sdk --no-list >/dev/null
 "$BIN/pm" quit >/dev/null
 wait "$DAEMON_PID"
 echo 'protocol integration: PASS'

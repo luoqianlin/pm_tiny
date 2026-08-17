@@ -123,7 +123,6 @@ namespace pm_tiny {
         void remove_prog(prog_ptr_t&prog);
         std::vector<std::string> dependency_dependents(const std::string &name) const;
 
-        void async_kill_prog(prog_ptr_t&prog_);
         void trigger_DAG_traversal_next_node(const prog_ptr_t&prog);
         void spawn1(proglist_t& started_progs);
 

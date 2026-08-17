@@ -6,6 +6,9 @@
 
 namespace pm_tiny {
 
+constexpr char windows_default_pipe_sddl[] =
+    "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+
 enum class daemon_platform {
     posix,
     windows
@@ -69,7 +72,7 @@ struct daemon_config {
     std::vector<unsigned int> allowed_gids;
 
     std::string pipe_name = "\\\\.\\pipe\\pm_tiny";
-    std::string pipe_sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    std::string pipe_sddl = windows_default_pipe_sddl;
     std::map<std::string, daemon_config_source> sources;
 
     daemon_config_source source_of(const std::string &field) const;

@@ -64,6 +64,8 @@ struct parsed_command {
     command_kind kind = command_kind::help;
     std::string name;
     bool show_log = false;
+    bool log_history = false;
+    bool no_list = false;
     list_render_options list_options;
     dependency_graph_render_options graph_options;
     start_command_options start;

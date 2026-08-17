@@ -12,6 +12,7 @@
 #include "win_config_loader.h"
 #include "daemon_config.h"
 #include "daemon_info.h"
+#include "program_log.h"
 
 namespace pm_tiny {
 namespace win {
@@ -56,7 +57,8 @@ private:
                             const char *data, std::size_t size, bool eof);
     void begin_log_stream(const std::shared_ptr<AsyncNamedPipeSession> &session,
                           const protocol_message &request, const std::string &name,
-                          bool follow_process = false);
+                          bool follow_process = false,
+                          log_request_mode mode = log_request_mode::live);
     pm_tiny::protocol_message handle_message(const pm_tiny::protocol_message &request);
     pm_tiny::protocol_message handle_list(const pm_tiny::protocol_message &request);
     pm_tiny::protocol_message handle_info(const pm_tiny::protocol_message &request);

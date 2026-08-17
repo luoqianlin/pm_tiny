@@ -38,7 +38,7 @@ path, root, mode = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     data = json.load(stream)
 assert data["schema_version"] == 1
-assert data["identity"]["version"] == "4.0.0"
+assert data["identity"]["version"] == "4.1.0"
 assert data["identity"]["protocol_version"] == 3
 assert data["identity"]["pid"] > 0
 assert data["identity"]["uptime_ms"] >= 0

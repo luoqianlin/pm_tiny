@@ -15,6 +15,7 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
 #else
 #include "signal_util.h"
 #include <unistd.h>
@@ -65,6 +66,37 @@ std::string timestamp_prefix(daemon_log_level_t level) {
 }
 
 void write_descriptor(int descriptor, const std::string &line) {
+#ifdef _WIN32
+    const auto native_handle = _get_osfhandle(descriptor);
+    if (native_handle != -1) {
+        const HANDLE handle = reinterpret_cast<HANDLE>(native_handle);
+        DWORD mode = 0;
+        if (GetConsoleMode(handle, &mode) != 0 && !line.empty()) {
+            const int wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                       line.data(), static_cast<int>(line.size()),
+                                                       nullptr, 0);
+            if (wide_count > 0) {
+                std::vector<wchar_t> wide(static_cast<std::size_t>(wide_count));
+                if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        line.data(), static_cast<int>(line.size()),
+                                        wide.data(), wide_count) == wide_count) {
+                    std::size_t offset = 0;
+                    while (offset < wide.size()) {
+                        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
+                            wide.size() - offset, 32767));
+                        DWORD written = 0;
+                        if (!WriteConsoleW(handle, wide.data() + offset, chunk, &written, nullptr) ||
+                            written == 0) {
+                            break;
+                        }
+                        offset += written;
+                    }
+                    if (offset == wide.size()) return;
+                }
+            }
+        }
+    }
+#endif
     const char *data = line.data();
     std::size_t remaining = line.size();
     while (remaining > 0) {

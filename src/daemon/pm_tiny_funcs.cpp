@@ -432,8 +432,13 @@ bool server_exiting(pm_tiny_server_t &pm_tiny_server,
 void prog_bind_session(pm_tiny::session_ptr_t &session,
                        const prog_ptr_t &prog, pm_tiny::frame_ptr_t &wf) {
     prog->add_session(session.get());
-    pm_tiny::fappend_value<int>(*wf, 1);
+    pm_tiny::fappend_value<int>(*wf, 0);
     pm_tiny::fappend_value(*wf, "success");
+    pm_tiny::program_log_response response;
+    response.mode = pm_tiny::log_request_mode::live;
+    response.generation = prog->instance.generation;
+    response.last_pid = prog->instance.last_pid;
+    pm_tiny::append_program_log_response(*wf, response);
 }
 
 void handle_frame(pm_tiny_server_t &pm_tiny_server,
@@ -467,7 +472,6 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
             session->write_frame(wf);
         } else {
             auto prog_ = *iter;
-            prog_->reset_restart_policy();
             if (!prog_->kill_pendingtasks.empty()) {
                 auto wf = std::make_unique<pm_tiny::frame_t>();
                 pm_tiny::fappend_value<int>(*wf, -0x3);
@@ -475,10 +479,12 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
                 pm_tiny::fappend_value(*wf, msg);
                 session->write_frame(wf);
             } else {
+                if (server_exiting(pm_tiny_server, session)) {
+                    return;
+                }
+                prog_->reset_restart_policy();
+                prog_->fail_pending_log_sessions("log wait canceled by stop");
                 if (prog_->instance.pid != -1) {
-                    if (server_exiting(pm_tiny_server, session)) {
-                        return;
-                    }
                     auto stop_proc_task =
                             [w = std::weak_ptr<pm_tiny::session_t>(session)](
                                     pm_tiny_server_t &pm_tiny_server) {
@@ -495,12 +501,14 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
                                 pm_tiny::fappend_value(*wf, "success");
                                 session->write_frame(wf);
                             };
-                    pm_tiny_server.async_kill_prog(prog_);
+                    prog_->async_kill_prog();
                     prog_->enqueue_after_termination(stop_proc_task);
                 } else {
+                    prog_->set_state(PM_TINY_PROG_STATE_STOPED);
+                    pm_tiny_server.mark_dependency_stopped(prog_);
                     auto wf = std::make_unique<pm_tiny::frame_t>();
-                    pm_tiny::fappend_value<int>(*wf, -2);
-                    pm_tiny::fappend_value(*wf, "`" + name + "` not running");
+                    pm_tiny::fappend_value<int>(*wf, 0);
+                    pm_tiny::fappend_value(*wf, "success");
                     session->write_frame(wf);
                 }
             }
@@ -572,7 +580,7 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
                         };
 
                 if (prog_->instance.pid != -1) {
-                    pm_tiny_server.async_kill_prog(prog_);
+                    prog_->async_kill_prog();
                     prog_->state = PM_TINY_PROG_STATE_REQUEST_DELETE;
                     prog_->enqueue_after_termination(delete_prog_task);
                 } else {
@@ -639,7 +647,7 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
                         };
 
                 if (is_alive) {
-                    pm_tiny_server.async_kill_prog(prog_);
+                    prog_->async_kill_prog();
                     prog_->enqueue_after_termination(start_prog_task);
                 } else {
                     start_prog_task(pm_tiny_server);
@@ -653,8 +661,15 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
         pm_tiny::fappend_value(*wf, pm_tiny::pm_tiny_version);
         session->write_frame(wf);
     } else if (command == pm_tiny::control_command::log) {
-        std::string name;
-        ifs >> name;
+        pm_tiny::program_log_request log_request;
+        try {
+            log_request = pm_tiny::read_program_log_request(request.payload);
+        } catch (const std::exception &error) {
+            auto wf = pm_tiny::make_control_response_payload(-1, error.what());
+            session->write_frame(wf);
+            return;
+        }
+        const auto &name = log_request.name;
         auto iter = std::find_if(pm_tiny_progs.begin(), pm_tiny_progs.end(),
                                  [&name](const prog_ptr_t &prog) {
                                      return prog->name == name;
@@ -665,17 +680,55 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
             pm_tiny::fappend_value(*wf, "not found `" + name + "`");
             session->write_frame(wf);
         } else {
-            bool is_alive = (*iter)->instance.pid != -1;
-            if (!is_alive) {
+            auto *prog = *iter;
+            bool is_alive = prog->instance.pid != -1;
+            if (log_request.mode == pm_tiny::log_request_mode::live && !is_alive) {
+                if (prog->restart_pending) {
+                    prog->wait_for_next_log_generation(session);
+                } else {
+                    pm_tiny::fappend_value<int>(*wf, 0x2);
+                    pm_tiny::fappend_value(*wf, "`" + name + "` is not running; use `pm log " +
+                                                  name + " --history` to show the last completed generation");
+                    session->write_frame(wf);
+                }
+            } else if (log_request.mode == pm_tiny::log_request_mode::history && is_alive) {
                 pm_tiny::fappend_value<int>(*wf, 0x2);
-                pm_tiny::fappend_value(*wf, "`" + name + "` not running");
+                pm_tiny::fappend_value(*wf, "`" + name + "` is running; use `pm log " + name + "`");
+                session->write_frame(wf);
+            } else if (log_request.mode == pm_tiny::log_request_mode::history &&
+                       (prog->instance.generation == 0 || !prog->has_last_exit ||
+                        prog->last_exit_time_unix_ms <= 0)) {
+                pm_tiny::fappend_value<int>(*wf, 0x2);
+                pm_tiny::fappend_value(*wf, "no completed log generation available for `" + name + "`");
                 session->write_frame(wf);
             } else {
-                (*iter)->add_session(session.get());
+                if (log_request.mode == pm_tiny::log_request_mode::live) prog->add_session(session.get());
                 pm_tiny::fappend_value<int>(*wf, 0);
                 pm_tiny::fappend_value(*wf, "success");
+                pm_tiny::program_log_response response;
+                response.mode = log_request.mode;
+                response.generation = prog->instance.generation;
+                response.last_pid = prog->instance.last_pid;
+                response.last_exit_time_unix_ms = prog->last_exit_time_unix_ms;
+                if (prog->has_last_exit) {
+                    if (WIFEXITED(prog->last_wstatus)) {
+                        response.exit_reason = "exited";
+                        response.exit_code = WEXITSTATUS(prog->last_wstatus);
+                    } else if (WIFSIGNALED(prog->last_wstatus)) {
+                        response.exit_reason = "signaled";
+                        response.exit_code = WTERMSIG(prog->last_wstatus);
+                    } else {
+                        response.exit_reason = "unknown";
+                        response.exit_code = prog->last_wstatus;
+                    }
+                }
+                pm_tiny::append_program_log_response(*wf, response);
                 session->write_frame(wf);
-                (*iter)->write_cache_log_to_session(session.get());
+                prog->write_cache_log_to_session(session.get());
+                if (log_request.mode == pm_tiny::log_request_mode::history) {
+                    auto final_frame = pm_tiny::str_to_frames(0, "");
+                    session->write_stream_frame(final_frame.front(), 0, false);
+                }
             }
         }
 

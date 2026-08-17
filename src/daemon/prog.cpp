@@ -50,14 +50,24 @@ namespace pm_tiny {
         if (prog_pid == -1) {
             prog_pid = instance.last_pid;
         }
-        std::string msg_content;
-        int msg_type;
-        msg_type = 0;
-        msg_content += PM_TINY_ANSI_COLOR_REST "\n\n";
-        msg_content += "PM_TINY MESSAGE:\n";
-        msg_content += log_proc_exit_status(this, prog_pid, last_wstatus);
-        msg_content += "\n";
-        this->write_msg_to_sessions(msg_type, msg_content);
+        std::string reason = "unknown";
+        int code = 0;
+        if (WIFEXITED(last_wstatus)) {
+            reason = "exited";
+            code = WEXITSTATUS(last_wstatus);
+        } else if (WIFSIGNALED(last_wstatus)) {
+            reason = "signaled";
+            code = WTERMSIG(last_wstatus);
+        }
+        const auto msg_content = format_program_exit_event(name, prog_pid, reason, code);
+        const int msg_type = 0;
+        if (!sessions.empty()) {
+            auto frames = str_to_frames(msg_type, msg_content);
+            for (std::size_t i = 0; i < frames.size(); ++i) {
+                for (auto *session : sessions)
+                    session->write_stream_frame(frames[i], 0, i + 1 < frames.size());
+            }
+        }
         detach_sessions();
     }
 
@@ -372,6 +382,41 @@ namespace pm_tiny {
             session->set_prog(nullptr);
         }
         this->sessions.clear();
+        fail_pending_log_sessions("log wait canceled before the next generation started");
+    }
+
+    void prog_info_t::wait_for_next_log_generation(const std::shared_ptr<session_t> &session) {
+        pending_log_sessions.emplace_back(session);
+    }
+
+    void prog_info_t::activate_pending_log_sessions() {
+        for (const auto &weak_session : pending_log_sessions) {
+            auto session = weak_session.lock();
+            if (!session || session->is_close()) continue;
+            auto response_frame = std::make_unique<frame_t>();
+            fappend_value<std::int32_t>(*response_frame, 0);
+            fappend_value(*response_frame, std::string("success"));
+            program_log_response response;
+            response.mode = log_request_mode::live;
+            response.generation = instance.generation;
+            response.last_pid = instance.last_pid;
+            append_program_log_response(*response_frame, response);
+            add_session(session.get());
+            session->write_frame(response_frame);
+        }
+        pending_log_sessions.clear();
+    }
+
+    void prog_info_t::fail_pending_log_sessions(const std::string &message) {
+        for (const auto &weak_session : pending_log_sessions) {
+            auto session = weak_session.lock();
+            if (!session || session->is_close()) continue;
+            auto response_frame = std::make_unique<frame_t>();
+            fappend_value<std::int32_t>(*response_frame, -1);
+            fappend_value(*response_frame, message);
+            session->write_frame(response_frame);
+        }
+        pending_log_sessions.clear();
     }
 
     bool build_prog_dependency_graph(const std::vector<prog_ptr_t> &progs,

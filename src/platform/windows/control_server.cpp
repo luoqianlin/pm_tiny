@@ -37,6 +37,7 @@ struct ControlServer::pending_response {
     std::string name;
     control_command command = control_command::list;
     unsigned long long generation = 0;
+    bool show_log = false;
 };
 
 struct ControlServer::log_stream {
@@ -46,9 +47,59 @@ struct ControlServer::log_stream {
     unsigned long long generation = 0;
     unsigned long long offset = 0;
     bool follow_process = false;
+    bool waiting_for_generation = false;
+    log_request_mode mode = log_request_mode::live;
 };
 
 namespace {
+
+struct delete_plan {
+    std::vector<ProgramConfig> remaining_configs;
+    dependency_graph remaining_graph;
+};
+
+bool prepare_delete(const std::string &name,
+                    const std::map<std::string, ProgramConfig> &config_map,
+                    const RuntimeControlState &runtime_state,
+                    delete_plan &plan,
+                    std::string &error_message) {
+    if (config_map.find(name) == config_map.end()) {
+        error_message = "process not found";
+        return false;
+    }
+    const auto id = runtime_state.graph.find(name);
+    if (id != dependency_graph::npos && !runtime_state.graph.dependents(id).empty()) {
+        std::string dependents;
+        for (const auto dependent : runtime_state.graph.dependents(id)) {
+            if (!dependents.empty()) dependents += ",";
+            dependents += runtime_state.graph.name(dependent);
+        }
+        error_message = "cannot delete `" + name + "`; required by: " + dependents;
+        return false;
+    }
+    plan.remaining_configs.clear();
+    plan.remaining_configs.reserve(config_map.size() - 1);
+    for (const auto &entry : config_map) {
+        if (entry.first != name) plan.remaining_configs.push_back(entry.second);
+    }
+    return build_dependencies(plan.remaining_configs, plan.remaining_graph, error_message);
+}
+
+void commit_delete(const std::string &name,
+                   std::map<std::string, ProgramConfig> &config_map,
+                   RuntimeControlState &runtime_state,
+                   delete_plan plan) {
+    config_map.erase(name);
+    replace_dependencies(runtime_state, std::move(plan.remaining_graph));
+}
+
+void apply_manual_stop(ProcessHandle &process, RuntimeControlState &runtime_state) {
+    process.disable_restart = true;
+    process.restart_pending = false;
+    process.restart_due_ms = 0;
+    process.restart_state.reset();
+    runtime_state.dependencies.mark_idle(process.config.name);
+}
 
 runtime_snapshot snapshot_runtime(const ProcessHandle &process,
                                   const RuntimeControlState &runtime_state,
@@ -245,6 +296,7 @@ void ControlServer::handle_process_exit(const std::string &name, unsigned long l
     process->root_exit_code = exit_code;
     process->has_last_exit = true;
     process->last_exit_code = exit_code;
+    process->last_exit_time_unix_ms = current_unix_time_millis();
 }
 
 void ControlServer::handle_async_request(const std::shared_ptr<AsyncNamedPipeSession> &session,
@@ -256,47 +308,18 @@ void ControlServer::handle_async_request(const std::shared_ptr<AsyncNamedPipeSes
         return;
     }
     if (decoded.command == control_command::log) {
-        begin_log_stream(session, request, decoded.name);
-        return;
-    }
-    if (decoded.command == control_command::restart) {
         try {
-            iframe_stream restart_payload(request.payload);
-            std::string restart_name;
-            int show_log = 0;
-            restart_payload >> restart_name;
-            if (restart_payload.remaining_size() > 0) restart_payload >> show_log;
-            if (show_log != 0) {
-                auto process = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &item) {
-                    return item.config.name == restart_name;
-                });
-                if (process == processes_.end()) {
-                    session->send(make_control_response(request, -1, "ERR process not found\n"));
-                    session->finish();
-                    return;
-                }
-                std::string error;
-                if (process->has_process) {
-                    if (!request_program_termination(*process, CompletionAction::restart, 0, error)) {
-                        session->send(make_control_response(request, -1, "ERR " + error + "\n"));
-                        session->finish();
-                        return;
-                    }
-                } else {
-                    const auto failures = schedule_dependency_launch(
-                        processes_, runtime_state_, runtime_state_.dependencies.request_closure(restart_name));
-                    if (!failures.empty()) {
-                        session->send(make_control_response(request, -1,
-                            "ERR failed to restart: " + failures.front() + "\n"));
-                        session->finish();
-                        return;
-                    }
-                }
-                session->send(make_control_response(request, 0, "OK restart scheduled\n"));
-                begin_log_stream(session, request, restart_name, true);
-                return;
-            }
-        } catch (...) {}
+            const auto log_request = read_program_log_request(request.payload);
+            const auto process = std::find_if(processes_.begin(), processes_.end(),
+                [&](const ProcessHandle &item) { return item.config.name == log_request.name; });
+            const bool wait_for_restart = log_request.mode == log_request_mode::live &&
+                process != processes_.end() && !process->has_process && process->restart_pending;
+            begin_log_stream(session, request, log_request.name, wait_for_restart, log_request.mode);
+        } catch (const std::exception &error) {
+            session->send(make_control_response(request, -1, std::string("ERR ") + error.what() + "\n"));
+            session->finish();
+        }
+        return;
     }
     if (decoded.command == control_command::reload) {
         if (persistence_.busy()) {
@@ -322,7 +345,7 @@ void ControlServer::handle_async_request(const std::shared_ptr<AsyncNamedPipeSes
             std::string error;
             request_program_termination(*iter, CompletionAction::remove, 0, error);
         }
-        pending_responses_.push_back({session, request, {}, decoded.command, 0});
+        pending_responses_.push_back({session, request, {}, decoded.command, 0, false});
         return;
     }
     if (decoded.command == control_command::save) {
@@ -348,7 +371,7 @@ void ControlServer::handle_async_request(const std::shared_ptr<AsyncNamedPipeSes
             session->finish();
             return;
         }
-        pending_responses_.push_back({session, request, {}, decoded.command, 0});
+        pending_responses_.push_back({session, request, {}, decoded.command, 0, false});
         return;
     }
     if (decoded.command != control_command::stop && decoded.command != control_command::restart &&
@@ -376,36 +399,66 @@ void ControlServer::handle_async_request(const std::shared_ptr<AsyncNamedPipeSes
         return;
     }
     std::string error;
+    bool show_log = false;
+    if (decoded.command == control_command::restart) {
+        try {
+            iframe_stream restart_payload(request.payload);
+            std::string ignored_name;
+            std::int32_t value = 0;
+            restart_payload >> ignored_name;
+            if (restart_payload.remaining_size() > 0) restart_payload >> value;
+            show_log = value != 0;
+        } catch (...) {}
+    }
     CompletionAction action = CompletionAction::remove;
     if (decoded.command == control_command::restart) action = CompletionAction::restart;
     if (decoded.command == control_command::remove) action = CompletionAction::delete_config;
+    delete_plan deletion;
+    if (decoded.command == control_command::remove &&
+        !prepare_delete(decoded.name, config_map_, runtime_state_, deletion, error)) {
+        session->send(make_control_response(request, -1, "ERR " + error + "\n"));
+        session->finish();
+        return;
+    }
     if (process->has_process && !request_program_termination(*process, action, 0, error)) {
         session->send(make_control_response(request, -1, "ERR " + error + "\n"));
         session->finish();
         return;
     }
+    if (decoded.command == control_command::remove) {
+        commit_delete(decoded.name, config_map_, runtime_state_, std::move(deletion));
+    }
+    if (decoded.command == control_command::stop) {
+        apply_manual_stop(*process, runtime_state_);
+    }
     if (!process->has_process) {
         if (decoded.command == control_command::stop) {
-            runtime_state_.dependencies.mark_idle(decoded.name);
             session->send(make_control_response(request, 0, "OK already stopped\n"));
         } else if (decoded.command == control_command::remove) {
-            config_map_.erase(decoded.name);
             processes_.erase(process);
-            std::vector<ProgramConfig> configs;
-            for (const auto &entry : config_map_) configs.push_back(entry.second);
-            std::string rebuild_error;
-            rebuild_dependencies(runtime_state_, configs, rebuild_error);
             session->send(make_control_response(request, 0, "OK deleted\n"));
         } else {
+            const auto previous_generation = process->generation;
             const auto failures = schedule_dependency_launch(
                 processes_, runtime_state_, runtime_state_.dependencies.request_closure(decoded.name));
-            session->send(make_control_response(request, failures.empty() ? 0 : -1,
-                failures.empty() ? "OK restart scheduled\n" : "ERR failed to restart: " + failures.front() + "\n"));
+            if (!failures.empty()) {
+                session->send(make_control_response(request, -1,
+                    "ERR failed to restart: " + failures.front() + "\n"));
+                session->finish();
+                return;
+            }
+            if (show_log) {
+                pending_responses_.push_back({session, request, decoded.name, decoded.command,
+                                              previous_generation, true});
+                return;
+            }
+            session->send(make_control_response(request, 0, "OK restart scheduled\n"));
         }
         session->finish();
         return;
     }
-    pending_responses_.push_back({session, request, decoded.name, decoded.command, process->generation});
+    pending_responses_.push_back({session, request, decoded.name, decoded.command,
+                                  process->generation, show_log});
 }
 
 void ControlServer::poll_pending_responses() {
@@ -436,22 +489,45 @@ void ControlServer::poll_pending_responses() {
             }
             complete = control_operation{operation_type, it->generation}.complete(state);
         }
-        if (!complete) { ++it; continue; }
+        if (!complete) {
+            if (it->command == control_command::restart && it->show_log &&
+                process != processes_.end() && !process->has_process &&
+                runtime_state_.dependencies.state(it->name) == dependency_runtime_state::failed) {
+                session->send(make_control_response(it->request, -1, "ERR failed to restart process\n"));
+                session->finish();
+                it = pending_responses_.erase(it);
+                continue;
+            }
+            ++it;
+            continue;
+        }
         const int response_code = it->command == control_command::save && save_result != 0 ? -1 : 0;
-        session->send(make_control_response(it->request, response_code,
+        auto response = make_control_response(it->request, response_code,
             it->command == control_command::save ?
                 (save_result == 0 ? "OK saved\n" : "ERR save failed\n") :
             it->command == control_command::reload ? "OK reloaded\n" :
             it->command == control_command::restart ? "OK restarted\n" :
-            it->command == control_command::remove ? "OK deleted\n" : "OK stopped\n"));
-        session->finish();
+            it->command == control_command::remove ? "OK deleted\n" : "OK stopped\n");
+        if (it->command == control_command::restart && it->show_log && process != processes_.end()) {
+            program_log_response metadata;
+            metadata.mode = log_request_mode::live;
+            metadata.generation = process->generation;
+            metadata.last_pid = process->last_pid;
+            append_program_log_response(response.payload, metadata);
+        }
+        session->send(std::move(response));
+        if (it->command == control_command::restart && it->show_log) {
+            begin_log_stream(session, it->request, it->name, false, log_request_mode::live);
+        } else {
+            session->finish();
+        }
         it = pending_responses_.erase(it);
     }
 }
 
 void ControlServer::begin_log_stream(const std::shared_ptr<AsyncNamedPipeSession> &session,
                                      const protocol_message &request, const std::string &name,
-                                     bool follow_process) {
+                                     bool follow_process, log_request_mode mode) {
     auto config = config_map_.find(name);
     if (config == config_map_.end()) {
         session->send(make_control_response(request, -1, "ERR process not found\n"));
@@ -461,17 +537,52 @@ void ControlServer::begin_log_stream(const std::shared_ptr<AsyncNamedPipeSession
     const auto process = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &item) {
         return item.config.name == name;
     });
-    if ((process == processes_.end() || process->generation == 0) && !follow_process) {
-        session->send(make_control_response(request, -1, "ERR no process generation available\n"));
+    if (process == processes_.end()) {
+        session->send(make_control_response(request, -1, "ERR process not found\n"));
         session->finish();
         return;
     }
-    if (request.type == static_cast<std::uint16_t>(control_command::log))
-        session->send(make_control_response(request, 0, "OK"));
-    const auto generation = process != processes_.end() ? process->generation : 0;
-    const auto offset = process != processes_.end() && process->generation != 0
+    if (mode == log_request_mode::live && !process->has_process && !follow_process) {
+        session->send(make_control_response(request, -1, "ERR `" + name +
+            "` is not running; use `pm log " + name + " --history` to show the last completed generation\n"));
+        session->finish();
+        return;
+    }
+    if (mode == log_request_mode::history && process->has_process) {
+        session->send(make_control_response(request, -1, "ERR `" + name +
+            "` is running; use `pm log " + name + "`\n"));
+        session->finish();
+        return;
+    }
+    if (mode == log_request_mode::history &&
+        (process->generation == 0 || !process->has_last_exit || process->last_exit_time_unix_ms <= 0)) {
+        session->send(make_control_response(request, -1,
+            "ERR no completed log generation available for `" + name + "`\n"));
+        session->finish();
+        return;
+    }
+    if (request.type == static_cast<std::uint16_t>(control_command::log) &&
+        (mode == log_request_mode::history || process->has_process)) {
+        auto response = make_control_response(request, 0, "OK");
+        program_log_response metadata;
+        metadata.mode = mode;
+        metadata.generation = process->generation;
+        metadata.last_pid = process->last_pid;
+        metadata.last_exit_time_unix_ms = process->last_exit_time_unix_ms;
+        if (process->has_last_exit) {
+            metadata.exit_reason = "exited";
+            metadata.exit_code = static_cast<std::int32_t>(process->last_exit_code);
+        }
+        append_program_log_response(response.payload, metadata);
+        session->send(std::move(response));
+    }
+    const bool waiting_for_generation = follow_process && !process->has_process &&
+        request.type == static_cast<std::uint16_t>(control_command::log);
+    const auto generation = process->generation;
+    const auto offset = !waiting_for_generation && generation != 0
         ? process->log_tail.begin_offset() : 0;
-    log_streams_.push_back({session, request, name, generation, offset, follow_process});
+    log_streams_.push_back({session, request, name, generation, offset, follow_process,
+                            waiting_for_generation, mode});
 }
 
 void ControlServer::poll_log_streams() {
@@ -481,10 +592,27 @@ void ControlServer::poll_log_streams() {
         const auto process = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &item) {
             return item.config.name == it->name;
         });
-        if (it->generation == 0) {
-            if (process != processes_.end() && process->has_process) {
+        if (it->waiting_for_generation) {
+            if (process != processes_.end() && process->generation != it->generation) {
+                if (it->request.type == static_cast<std::uint16_t>(control_command::log)) {
+                    auto response = make_control_response(it->request, 0, "OK");
+                    program_log_response metadata;
+                    metadata.mode = log_request_mode::live;
+                    metadata.generation = process->generation;
+                    metadata.last_pid = process->last_pid;
+                    append_program_log_response(response.payload, metadata);
+                    session->send(std::move(response));
+                }
                 it->generation = process->generation;
                 it->offset = process->log_tail.begin_offset();
+                it->waiting_for_generation = false;
+            } else if (it->request.type == static_cast<std::uint16_t>(control_command::log) &&
+                       (process == processes_.end() || !process->restart_pending)) {
+                session->send(make_control_response(it->request, -1,
+                    "ERR log wait ended before the next generation started\n"));
+                session->finish();
+                it = log_streams_.erase(it);
+                continue;
             } else { ++it; continue; }
         }
         const bool generation_exists = process != processes_.end() && process->generation == it->generation;
@@ -506,14 +634,20 @@ void ControlServer::poll_log_streams() {
             ++it;
             continue;
         }
-        if (generation_active) { ++it; continue; }
+        if (generation_active && it->mode == log_request_mode::live) { ++it; continue; }
         {
             protocol_message final_chunk;
             final_chunk.type = it->request.type;
             final_chunk.request_id = it->request.request_id;
             final_chunk.flags = static_cast<std::uint8_t>(protocol_flag_response | protocol_flag_stream);
-            fappend_value<std::int32_t>(final_chunk.payload, 1);
-            fappend_value(final_chunk.payload, std::string{});
+            fappend_value<std::int32_t>(final_chunk.payload, 0);
+            std::string exit_event;
+            if (it->mode == log_request_mode::live && generation_exists && process->has_last_exit) {
+                exit_event = format_program_exit_event(process->config.name,
+                                                        static_cast<std::int64_t>(process->last_pid),
+                                                        "exited", process->last_exit_code);
+            }
+            fappend_value(final_chunk.payload, exit_event);
             session->send(std::move(final_chunk));
         }
         session->finish();
@@ -538,17 +672,33 @@ pm_tiny::protocol_message ControlServer::handle_message(const pm_tiny::protocol_
         case control_command::restart: result = handle_restart(args); break;
         case control_command::save: result = handle_save(); break;
         case control_command::remove: result = handle_delete(args); break;
-        case control_command::version: result = "pm_tiny Windows v3"; break;
+        case control_command::version: {
+            protocol_message response;
+            response.type = request.type;
+            response.request_id = request.request_id;
+            response.flags = protocol_flag_response;
+            fappend_value<std::int32_t>(response.payload, 0);
+            fappend_value(response.payload, std::string("success"));
+            fappend_value(response.payload, std::string(PM_TINY_VERSION));
+            return response;
+        }
         case control_command::log: result = handle_log(args); break;
         case control_command::inspect: return handle_inspect(request, args);
         case control_command::reload: result = handle_reload(); break;
         case control_command::app_ready: result = handle_app_signal(args, true); break;
         case control_command::app_tick: result = handle_app_signal(args, false); break;
-        case control_command::quit:
+        case control_command::quit: {
             should_stop_.store(true);
             running_.store(false);
-            result = "OK quitting\n";
-            break;
+            protocol_message response;
+            response.type = request.type;
+            response.request_id = request.request_id;
+            response.flags = protocol_flag_response;
+            fappend_value<std::int32_t>(response.payload, 0);
+            fappend_value(response.payload, std::string("success"));
+            fappend_value<std::int32_t>(response.payload, static_cast<std::int32_t>(GetCurrentProcessId()));
+            return response;
+        }
         case control_command::list: break;
         case control_command::info: break;
     }
@@ -618,15 +768,14 @@ std::string ControlServer::handle_stop(const std::string &name) {
     }
     ProcessHandle &proc = *it;
     if (!proc.has_process || proc.proc_info.hProcess == nullptr) {
-        runtime_state_.dependencies.mark_idle(name);
+        apply_manual_stop(proc, runtime_state_);
         return "OK already stopped\n";
     }
-    proc.disable_restart = true;
-    proc.restart_state.reset();
     std::string terminate_error;
     if (!request_program_termination(proc, CompletionAction::remove, 0, terminate_error)) {
         return "ERR " + terminate_error + "\n";
     }
+    apply_manual_stop(proc, runtime_state_);
     if (!terminate_error.empty()) daemon_log_message(daemon_log_level_t::warn, proc.config.name + ": " + terminate_error);
     const auto generation = proc.generation;
     (void)generation;
@@ -683,7 +832,7 @@ pm_tiny::protocol_message ControlServer::handle_start(const pm_tiny::protocol_me
         current_process->restart_state.reset();
         current_process->restart_pending = false;
         current_process->restart_due_ms = 0;
-        runtime_state_.dependencies.mark_pending(cfg.name);
+        runtime_state_.dependencies.mark_idle(cfg.name);
     }
     if (cfg.cwd.empty()) {
         cfg.cwd = ".";
@@ -748,29 +897,20 @@ pm_tiny::protocol_message ControlServer::handle_start(const pm_tiny::protocol_me
     response.type = message.type;
     response.request_id = message.request_id;
     response.flags = pm_tiny::protocol_flag_response;
-    pm_tiny::fappend_value<std::int32_t>(response.payload,
-        start.result == start_result::blocked ? -1 : 0);
+    pm_tiny::fappend_value<std::int32_t>(response.payload, 0);
     pm_tiny::fappend_value(response.payload,
         start.result == start_result::started ? std::string("started") : start.state);
     pm_tiny::append_start_response(response.payload, start);
-    if (start.result == start_result::blocked) response.flags |= pm_tiny::protocol_flag_error;
     return response;
 }
 
 std::string ControlServer::handle_delete(const std::string &name) {
-    const auto id = runtime_state_.graph.find(name);
-    if (id != dependency_graph::npos && !runtime_state_.graph.dependents(id).empty()) {
-        std::string dependents;
-        for (const auto dependent : runtime_state_.graph.dependents(id)) {
-            if (!dependents.empty()) dependents += ",";
-            dependents += runtime_state_.graph.name(dependent);
-        }
-        return "ERR cannot delete `" + name + "`; required by: " + dependents + "\n";
-    }
+    delete_plan deletion;
+    std::string error;
+    if (!prepare_delete(name, config_map_, runtime_state_, deletion, error)) return "ERR " + error + "\n";
     auto it = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &proc) {
         return proc.config.name == name;
     });
-    const bool had_process_record = it != processes_.end();
     if (it != processes_.end()) {
         it->disable_restart = true;
         if (it->has_process && it->proc_info.hProcess != nullptr) {
@@ -779,18 +919,14 @@ std::string ControlServer::handle_delete(const std::string &name) {
                 return "ERR " + terminate_error + "\n";
             }
             if (!terminate_error.empty()) daemon_log_message(daemon_log_level_t::warn, it->config.name + ": " + terminate_error);
+            commit_delete(name, config_map_, runtime_state_, std::move(deletion));
             return "OK delete scheduled\n";
         } else {
             it->reset();
             processes_.erase(it);
-            config_map_.erase(name);
-            std::vector<ProgramConfig> configs;
-            for (const auto &entry : config_map_) configs.push_back(entry.second);
-            std::string error;
-            rebuild_dependencies(runtime_state_, configs, error);
         }
     }
-    if (config_map_.erase(name) == 0 && !had_process_record) return "ERR process not found\n";
+    commit_delete(name, config_map_, runtime_state_, std::move(deletion));
     return "OK deleted\n";
 }
 

@@ -1,0 +1,5 @@
+- name: root
+  executable: /bin/true
+- name: child
+  executable: /bin/true
+  depends_on: [root]

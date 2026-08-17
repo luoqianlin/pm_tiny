@@ -14,17 +14,63 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits.h>
 #include <memory>
+#include <pwd.h>
 #include <signal.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <iostream>
+#include <stdexcept>
 #include <unistd.h>
 
 volatile sig_atomic_t pm_is_stop = 0;
 
 namespace {
+
+std::string absolute_existing_path(const std::string &path, const char *kind) {
+    char resolved[PATH_MAX];
+    if (realpath(path.c_str(), resolved) == nullptr) {
+        throw std::runtime_error(std::string("resolve ") + kind + " `" + path + "`: " + std::strerror(errno));
+    }
+    return resolved;
+}
+
+bool executable_file(const std::string &path) {
+    struct stat info{};
+    return stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) && access(path.c_str(), X_OK) == 0;
+}
+
+std::string resolve_start_executable(const std::string &input, const std::string &cwd) {
+    if (input.empty()) throw std::runtime_error("resolve executable: empty path");
+    if (input.find('/') != std::string::npos) {
+        const std::string candidate = input.front() == '/' ? input : cwd + "/" + input;
+        const auto resolved = absolute_existing_path(candidate, "executable");
+        if (!executable_file(resolved))
+            throw std::runtime_error("resolve executable `" + input + "`: file is not executable");
+        return resolved;
+    }
+
+    char cwd_resolved[PATH_MAX];
+    if (realpath((cwd + "/" + input).c_str(), cwd_resolved) != nullptr && executable_file(cwd_resolved))
+        return cwd_resolved;
+
+    const char *path_env = std::getenv("PATH");
+    std::string path_list = path_env == nullptr ? std::string() : path_env;
+    std::size_t begin = 0;
+    while (begin <= path_list.size()) {
+        const auto end = path_list.find(':', begin);
+        const auto directory = path_list.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        const std::string candidate = (directory.empty() ? std::string(".") : directory) + "/" + input;
+        char resolved[PATH_MAX];
+        if (realpath(candidate.c_str(), resolved) != nullptr && executable_file(resolved)) return resolved;
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    throw std::runtime_error("resolve executable not found: " + input);
+}
 
 std::unique_ptr<pm_tiny::session_t> connect_to_daemon() {
     const pm_tiny::daemon_cli_options options;
@@ -117,6 +163,15 @@ int main(int argc, char *argv[]) {
                      "run pm_tiny as root and use --user instead of `%s`\n",
                      command.start.executable.c_str());
     }
+    if (command.kind == pm_tiny::cli::command_kind::start && command.start.create &&
+        !command.start.run_as.empty() && command.start.executable.find('/') == std::string::npos) {
+        const passwd *target = getpwnam(command.start.run_as.c_str());
+        if (target != nullptr && target->pw_uid != geteuid()) {
+            std::fprintf(stderr, "pm: cross-user start requires executable containing `/`: `%s`\n",
+                         command.start.executable.c_str());
+            return EXIT_FAILURE;
+        }
+    }
 
     configure_signals();
     auto session = connect_to_daemon();
@@ -156,7 +211,14 @@ int main(int argc, char *argv[]) {
                     }
                     config.cwd = cwd;
                 }
-                config.executable = command.start.executable;
+                try {
+                    config.cwd = absolute_existing_path(config.cwd, "cwd");
+                    config.executable = resolve_start_executable(command.start.executable, config.cwd);
+                } catch (const std::exception &error) {
+                    std::fprintf(stderr, "pm: %s\n", error.what());
+                    success = false;
+                    break;
+                }
                 config.args = command.start.args;
                 config.kill_timeout_s = command.start.kill_timeout_sec;
                 config.run_as = command.start.run_as;
@@ -192,15 +254,17 @@ int main(int argc, char *argv[]) {
             success = start_proc(*session, request);
             break;
         }
-        case pm_tiny::cli::command_kind::stop: success = stop_proc(*session, command.name); break;
+        case pm_tiny::cli::command_kind::stop: success = stop_proc(*session, command.name, command.no_list); break;
         case pm_tiny::cli::command_kind::restart:
-            success = restart_prog(*session, command.name, command.show_log);
+            success = restart_prog(*session, command.name, command.show_log, command.no_list);
             break;
-        case pm_tiny::cli::command_kind::remove: success = delete_prog(*session, command.name); break;
+        case pm_tiny::cli::command_kind::remove: success = delete_prog(*session, command.name, command.no_list); break;
         case pm_tiny::cli::command_kind::save: success = save_proc(*session); break;
-        case pm_tiny::cli::command_kind::log: success = show_prog_log(*session, command.name); break;
+        case pm_tiny::cli::command_kind::log:
+            success = show_prog_log(*session, command.name, command.log_history);
+            break;
         case pm_tiny::cli::command_kind::inspect: success = inspect_proc(*session, command.name); break;
-        case pm_tiny::cli::command_kind::reload: success = pm_tiny_reload(*session, 1); break;
+        case pm_tiny::cli::command_kind::reload: success = pm_tiny_reload(*session, 1, command.no_list); break;
         case pm_tiny::cli::command_kind::quit: success = pm_tiny_quit(*session); break;
         case pm_tiny::cli::command_kind::version: success = show_version(*session); break;
         case pm_tiny::cli::command_kind::info: success = display_daemon_info(*session, command.info_json); break;

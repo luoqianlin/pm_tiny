@@ -104,6 +104,8 @@ add_executable(connection_error_test unit/connection_error_test.cpp)
 target_link_libraries(connection_error_test pm_tiny_cli_connection_error)
 add_executable(cli_command_test unit/cli_command_test.cpp)
 target_link_libraries(cli_command_test pm_tiny_cli_command)
+add_executable(cli_response_test unit/cli_response_test.cpp)
+target_link_libraries(cli_response_test pm_tiny_cli_command)
 add_executable(prog_cfg_order_test unit/prog_cfg_order_test.cpp)
 target_link_libraries(prog_cfg_order_test pm_tiny_dependency_graph pm_tiny_program_name)
 add_executable(dependency_graph_test unit/dependency_graph_test.cpp)
@@ -114,6 +116,7 @@ add_executable(restart_policy_test unit/restart_policy_test.cpp)
 target_link_libraries(restart_policy_test pm_tiny_restart_policy)
 
 add_executable(process_tree_fixture fixtures/process_tree_fixture.cpp)
+add_executable(posix_runtime_fixture fixtures/posix_runtime_fixture.cpp)
 add_executable(process_tree_controller_test
         unit/process_tree_controller_test.cpp
         ../src/platform/linux/process_tree_controller.cpp
@@ -171,6 +174,7 @@ set(PM_TINY_AUTOMATED_TESTS
         dependency_graph_renderer_test
         connection_error_test
         cli_command_test
+        cli_response_test
         prog_cfg_order_test
         dependency_graph_test
         control_command_test
@@ -196,6 +200,15 @@ else ()
     set_tests_properties(protocol_integration PROPERTIES
             ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}")
 endif ()
+set_tests_properties(protocol_integration PROPERTIES
+        TIMEOUT 90
+        LABELS "integration;linux;protocol")
+add_test(NAME lifecycle_transition_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/lifecycle_transition_integration.sh)
+set_tests_properties(lifecycle_transition_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 30
+        LABELS "integration;linux;lifecycle")
 add_test(NAME cli_signal_integration
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/cli_signal_integration.py
         $<TARGET_FILE:pm>)
@@ -239,9 +252,34 @@ set_tests_properties(dependency_integration PROPERTIES
         ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
         TIMEOUT 30
         LABELS "integration;linux;dependency")
+add_test(NAME concurrent_control_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/concurrent_control_integration.sh)
+set_tests_properties(concurrent_control_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 60
+        LABELS "integration;linux;concurrency")
 add_test(NAME privilege_drop_integration
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/privilege_drop_integration.sh)
 set_tests_properties(privilege_drop_integration PROPERTIES
         ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
         TIMEOUT 30
         LABELS "integration;linux;privilege")
+add_test(NAME posix_runtime_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/posix_runtime_integration.sh)
+set_tests_properties(posix_runtime_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 30
+        LABELS "integration;linux;pty;logging")
+add_test(NAME cgroup_v2_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/cgroup_v2_integration.sh)
+set_tests_properties(cgroup_v2_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 30
+        SKIP_RETURN_CODE 77
+        LABELS "integration;linux;privileged;cgroup")
+add_test(NAME release_transaction_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/release_transaction_integration.sh)
+set_tests_properties(release_transaction_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR};PM_TINY_SOURCE_DIR=${CMAKE_SOURCE_DIR};PM_TINY_RELEASE_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/linux-release"
+        TIMEOUT 60
+        LABELS "integration;linux;install;upgrade;rollback")

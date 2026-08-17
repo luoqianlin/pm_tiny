@@ -97,8 +97,12 @@ Windows 可增加：
 
 ```yaml
 pm_tiny_pipe_name: \\.\pipe\pm_tiny
-pm_tiny_pipe_sddl: D:P(A;;GA;;;SY)(A;;GA;;;BA)
+pm_tiny_pipe_sddl: D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)
 ```
+
+该默认值允许 `SYSTEM` 和本机管理员完全控制，并允许本机交互登录用户读写控制管道，因此普通用户可直接
+以前台方式运行 `pm_tiny` 和 `pm`。控制管道拒绝远程客户端。显式配置的 SDDL 始终优先；升级前已经写入
+旧管理员专用 SDDL 的配置不会被自动放宽。
 
 配置文件中的相对路径以 `pm_tiny.yaml` 所在目录为基准。环境变量和 CLI 中的相对路径以启动
 daemon 或 CLI 时的工作目录为基准。Windows 参数、环境变量和配置路径使用 UTF-8 内部表示，并通过

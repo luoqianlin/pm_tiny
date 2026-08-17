@@ -38,7 +38,28 @@ int main() {
     auto restart = parse({"pm", "restart", "app", "--log"});
     expect(restart.success && restart.command.name == "app" && restart.command.show_log,
            "restart --log should parse");
+    auto restart_no_list = parse({"pm", "restart", "app", "--log", "--no-list"});
+    expect(restart_no_list.success && restart_no_list.command.show_log && restart_no_list.command.no_list,
+           "restart --log --no-list should parse");
+    auto stop_no_list = parse({"pm", "stop", "app", "--no-list"});
+    auto delete_no_list = parse({"pm", "delete", "app", "--no-list"});
+    auto reload_no_list = parse({"pm", "reload", "--no-list"});
+    expect(stop_no_list.success && stop_no_list.command.no_list,
+           "stop --no-list should parse");
+    expect(delete_no_list.success && delete_no_list.command.no_list,
+           "delete --no-list should parse");
+    expect(reload_no_list.success && reload_no_list.command.no_list,
+           "reload --no-list should parse");
+    expect(!parse({"pm", "save", "--no-list"}).success, "save should reject --no-list");
+    expect(!parse({"pm", "quit", "--no-list"}).success, "quit should reject --no-list");
     expect(!parse({"pm", "stop"}).success, "named command should require a name");
+    auto history = parse({"pm", "log", "app", "--history"});
+    expect(history.success && history.command.kind == command_kind::log && history.command.log_history,
+           "log --history should parse");
+    expect(!parse({"pm", "log", "app", "--follow"}).success,
+           "unknown log option should fail");
+    expect(!parse({"pm", "restart", "app", "--history"}).success,
+           "restart should reject --history");
 
     auto start = parse({"pm", "start", "api", "--kill-timeout", "5",
                         "--depends-on", "db", "--depends-on", "cache", "--failure-action", "restart",
@@ -86,6 +107,8 @@ int main() {
            "info protocol mapping should be shared");
     expect(pm_tiny::cli::command_usage("pm", true).find("info [--json]") != std::string::npos,
            "info help text missing");
+    expect(pm_tiny::cli::command_usage("pm", true).find("log <name> [--history]") != std::string::npos,
+           "log history help text missing");
     expect(parse({"pm", "shutdown"}).command.kind == command_kind::quit, "shutdown alias should parse");
     return 0;
 }

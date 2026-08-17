@@ -91,6 +91,21 @@ int main() {
     expect(runtime.state("extra") == dependency_runtime_state::idle,
            "new graph node should start idle");
 
+    dependency_graph peer_graph;
+    expect(dependency_graph::build({node("peer"), node("target")}, peer_graph, error),
+           "independent peer graph should be valid");
+    runtime.reset(peer_graph);
+    runtime.mark_pending("target");
+    const auto pending_snapshot = runtime.snapshot();
+    runtime.migrate(peer_graph, pending_snapshot);
+    expect(runtime.state("target") == dependency_runtime_state::pending,
+           "pending state should survive graph migration");
+    expect(runtime.mark_ready("peer") == std::vector<std::string>({"target"}),
+           "ready peer must return every newly startable process");
+    expect(runtime.state("target") == dependency_runtime_state::starting,
+           "returned process should transition to starting exactly once");
+    expect(runtime.mark_ready("peer").empty(), "ready peer must not return target twice");
+
     dependency_graph invalid;
     expect(!dependency_graph::build({node("a", {"missing"})}, invalid, error) &&
            error.code == dependency_error_code::missing_dependency, "missing dependency should fail");

@@ -15,6 +15,101 @@ jobs:
         run: cmake --build build -j2
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Upload Linux failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-artifacts
+          path: build/test-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux-sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-sanitized
+          -DCMAKE_BUILD_TYPE=Debug
+          -DPM_TINY_SANITIZER_ENABLE=ON
+          -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - name: Build
+        run: cmake --build build-sanitized -j2
+      - name: Test
+        run: ctest --test-dir build-sanitized --output-on-failure
+
+  linux-real-cgroup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - name: Build cgroup fixtures
+        run: cmake --build build --parallel 2 --target pm pm_tiny process_tree_fixture
+      - name: Real cgroup v2 regression
+        env:
+          PM_TINY_TEST_BIN: ${{ github.workspace }}/build
+          PM_TINY_REQUIRE_REAL_CGROUP: "1"
+          PM_TINY_ALLOW_SUDO: "1"
+        run: bash tests/integration/linux/cgroup_v2_integration.sh
+
+  llvm-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test, and report coverage
+        env:
+          PM_TINY_BUILD_JOBS: "2"
+        run: bash scripts/test/coverage.sh
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-coverage
+          path: build/test-artifacts/coverage
+          if-no-files-found: error
+          retention-days: 14
+
+  libfuzzer-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run three libFuzzer targets
+        env:
+          PM_TINY_FUZZ_DURATION: "30"
+          PM_TINY_FUZZ_ARTIFACT_DIR: ${{ github.workspace }}/build/test-artifacts/fuzz/libfuzzer
+          PM_TINY_BUILD_JOBS: "2"
+        run: bash scripts/test/fuzz.sh smoke libfuzzer
+      - name: Upload libFuzzer artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libfuzzer-smoke
+          path: build/test-artifacts/fuzz/libfuzzer
+          if-no-files-found: warn
+          retention-days: 14
+
+  afl-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install AFL++
+        run: sudo apt-get update && sudo apt-get install -y afl++
+      - name: Run three AFL++ targets
+        env:
+          PM_TINY_FUZZ_DURATION: "30"
+          PM_TINY_FUZZ_ARTIFACT_DIR: ${{ github.workspace }}/build/test-artifacts/fuzz/afl
+          PM_TINY_BUILD_JOBS: "2"
+        run: bash scripts/test/fuzz.sh smoke afl
+      - name: Upload AFL++ artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: afl-smoke
+          path: build/test-artifacts/fuzz/afl
+          if-no-files-found: warn
+          retention-days: 14
 
   android-arm64:
     runs-on: ubuntu-latest
@@ -46,9 +141,9 @@ jobs:
       - name: Configure
         run: cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - name: Build
-        run: cmake --build build-msvc --config Debug --parallel 2
+        run: cmake --build build-msvc --config Release --parallel 2
       - name: Test
-        run: ctest --test-dir build-msvc -C Debug --output-on-failure
+        run: ctest --test-dir build-msvc -C Release --output-on-failure
       - name: Upload Windows MSVC test artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -57,5 +152,9 @@ jobs:
           path: |
             build-msvc/test-artifacts/windows
             build-msvc/test-artifacts/windows-service
+            build-msvc/test-artifacts/windows-lifecycle
+            build-msvc/test-artifacts/windows-dependency
+            build-msvc/test-artifacts/windows-concurrent
+            build-msvc/test-artifacts/windows-release
           if-no-files-found: ignore
           retention-days: 7
