@@ -148,6 +148,8 @@ add_executable(termination_job_test unit/termination_job_test.cpp)
 target_link_libraries(termination_job_test pm_tiny_lifecycle)
 add_executable(control_operation_test unit/control_operation_test.cpp)
 target_link_libraries(control_operation_test pm_tiny_lifecycle)
+add_executable(lifecycle_orchestrator_test unit/lifecycle_orchestrator_test.cpp)
+target_link_libraries(lifecycle_orchestrator_test pm_tiny_lifecycle)
 add_executable(scope_guard_test unit/scope_guard_test.cpp)
 
 set(PM_TINY_AUTOMATED_TESTS
@@ -185,7 +187,8 @@ set(PM_TINY_AUTOMATED_TESTS
         child_launch_context_test
         managed_process_instance_test
         termination_job_test
-        control_operation_test)
+        control_operation_test
+        lifecycle_orchestrator_test)
 
 foreach(test_target IN LISTS PM_TINY_AUTOMATED_TESTS)
     add_test(NAME ${test_target} COMMAND ${test_target})
@@ -246,9 +249,21 @@ set_tests_properties(restart_policy_integration PROPERTIES
         ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
         TIMEOUT 30
         LABELS "integration;linux;restart")
+add_test(NAME failure_action_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/failure_action_integration.sh)
+set_tests_properties(failure_action_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 30
+        LABELS "integration;linux;restart;dependency")
 add_test(NAME dependency_integration
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/dependency_integration.sh)
 set_tests_properties(dependency_integration PROPERTIES
+        ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
+        TIMEOUT 30
+        LABELS "integration;linux;dependency")
+add_test(NAME dependency_mutation_integration
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux/dependency_mutation_integration.sh)
+set_tests_properties(dependency_mutation_integration PROPERTIES
         ENVIRONMENT "PM_TINY_TEST_BIN=${CMAKE_BINARY_DIR}"
         TIMEOUT 30
         LABELS "integration;linux;dependency")

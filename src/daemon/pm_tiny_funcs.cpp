@@ -749,6 +749,7 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
             if (prog->state == PM_TINY_PROG_STATE_STARTING) {
                 prog->state = PM_TINY_PROG_STATE_RUNING;
                 prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
+                prog->heartbeat_action_due_ms = 0;
                 proglist_t pl;
                 pl.push_back(prog);
                 pm_tiny_server.spawn1(pl);
@@ -770,6 +771,7 @@ void handle_frame(pm_tiny_server_t &pm_tiny_server,
             PM_TINY_DLOG_DEBUG("recv `%s` tick", name.c_str());
             if (prog->state == PM_TINY_PROG_STATE_RUNING) {
                 prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
+                prog->heartbeat_action_due_ms = 0;
             }
         }
     } else if (command == pm_tiny::control_command::inspect) {

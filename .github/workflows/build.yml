@@ -164,6 +164,7 @@ jobs:
             build-msvc/test-artifacts/windows-service
             build-msvc/test-artifacts/windows-lifecycle
             build-msvc/test-artifacts/windows-dependency
+            build-msvc/test-artifacts/windows-dependency-runtime
             build-msvc/test-artifacts/windows-concurrent
             build-msvc/test-artifacts/windows-release
           if-no-files-found: ignore

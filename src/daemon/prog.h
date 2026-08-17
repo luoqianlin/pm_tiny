@@ -140,6 +140,7 @@ namespace pm_tiny {
         bool daemon = true;
         int heartbeat_timeout = -1;//The unit is second, its value <=0 means disable
         int64_t last_tick_timepoint = 0;//milliseconds
+        int64_t heartbeat_action_due_ms = 0;
         bool use_pty = false;
         std::string process_tree_backend;
         bool process_tree_degraded = false;
@@ -189,9 +190,6 @@ namespace pm_tiny {
         void add_session(session_t *session);
 
         static std::string log_proc_exit_status(pm_tiny::prog_info_t *prog, int pid, int wstatus);
-
-        bool is_start_timeout() const;
-        bool is_tick_timeout() const;
 
         void async_force_kill();
 

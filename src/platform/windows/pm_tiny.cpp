@@ -5,6 +5,7 @@
 #include "daemon_log.h"
 #include "daemon_config.h"
 #include "pm_tiny.h"
+#include "lifecycle_orchestrator.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -53,39 +55,40 @@ bool create_directory_tree(const std::string &path, std::string &error) {
     return false;
 }
 
-unsigned long next_loop_wait_ms(const std::vector<pm_tiny::win::ProcessHandle> &processes,
-                                unsigned long long now_ms, bool persistence_busy) {
-    if (persistence_busy) return 10;
-    unsigned long long next_due_ms = now_ms + 1000;
-    bool draining = false;
-    const auto consider = [&](unsigned long long due_ms) {
-        if (due_ms <= now_ms) next_due_ms = now_ms;
-        else next_due_ms = std::min(next_due_ms, due_ms);
-    };
-    for (const auto &process : processes) {
-        if (!process.has_process) {
-            if (process.restart_pending) consider(process.restart_due_ms);
-            continue;
-        }
-        if (process.termination.phase() != pm_tiny::termination_phase::none) {
-            draining = true;
-            const auto phase = process.termination.phase();
-            if (phase == pm_tiny::termination_phase::term_requested ||
-                phase == pm_tiny::termination_phase::tree_draining)
-                consider(static_cast<unsigned long long>(process.termination.deadline_ms()));
-            continue;
-        }
-        if (!process.ready && process.config.start_timeout > 0) {
-            consider(process.launch_time_ms +
-                     static_cast<unsigned long long>(process.config.start_timeout) * 1000ULL);
-        } else if (process.ready && process.config.heartbeat_timeout > 0) {
-            consider(process.last_tick_ms +
-                     static_cast<unsigned long long>(process.config.heartbeat_timeout) * 1000ULL);
-        }
+pm_tiny::lifecycle_tick_plan plan_process_lifecycle(
+    const std::vector<pm_tiny::win::ProcessHandle> &processes,
+    unsigned long long now_ms,
+    bool persistence_busy) {
+    std::vector<pm_tiny::lifecycle_process_observation> observations;
+    observations.reserve(processes.size());
+    for (std::size_t index = 0; index < processes.size(); ++index) {
+        const auto &process = processes[index];
+        pm_tiny::lifecycle_process_observation observation;
+        observation.process_index = index;
+        observation.generation = process.generation;
+        observation.has_process = process.has_process;
+        observation.starting = process.has_process && !process.ready;
+        observation.online = process.has_process && process.ready;
+        observation.terminating = process.termination.phase() != pm_tiny::termination_phase::none;
+        const auto phase = process.termination.phase();
+        observation.tree_draining = phase == pm_tiny::termination_phase::tree_draining ||
+                                    phase == pm_tiny::termination_phase::force_kill_requested;
+        if (phase == pm_tiny::termination_phase::term_requested ||
+            phase == pm_tiny::termination_phase::tree_draining)
+            observation.termination_due_ms = process.termination.deadline_ms();
+        observation.restart_pending = process.restart_pending;
+        observation.restart_due_ms = static_cast<std::int64_t>(process.restart_due_ms);
+        observation.launch_time_ms = static_cast<std::int64_t>(process.launch_time_ms);
+        observation.last_tick_ms = static_cast<std::int64_t>(process.last_tick_ms);
+        observation.heartbeat_action_due_ms =
+            static_cast<std::int64_t>(process.heartbeat_action_due_ms);
+        observation.start_timeout_s = process.config.start_timeout;
+        observation.heartbeat_timeout_s = process.config.heartbeat_timeout;
+        observation.failure_action = process.config.failure_action;
+        observations.push_back(observation);
     }
-    if (draining) return 25;
-    if (next_due_ms <= now_ms) return 1;
-    return static_cast<unsigned long>(std::min<unsigned long long>(1000, next_due_ms - now_ms));
+    return pm_tiny::plan_lifecycle_tick(static_cast<std::int64_t>(now_ms), observations,
+                                        persistence_busy);
 }
 
 pm_tiny::daemon_cli_options g_options;
@@ -229,6 +232,17 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
         bool shutdown_complete = false;
         {
             const auto now_ms = pm_tiny::win::monotonic_millis();
+            const auto lifecycle_plan = plan_process_lifecycle(
+                processes, now_ms, control_server.persistence_busy());
+            std::set<std::string> due_restarts;
+            for (const auto index : lifecycle_plan.due_restarts) {
+                if (index < processes.size()) due_restarts.insert(processes[index].config.name);
+            }
+            std::map<std::string, pm_tiny::lifecycle_timeout_event> timeout_events;
+            for (const auto &event : lifecycle_plan.timeouts) {
+                if (event.process_index < processes.size())
+                    timeout_events[processes[event.process_index].config.name] = event;
+            }
 
             if (g_should_stop.load() && !shutdown_scheduled) {
                 log_info("Termination requested. Stopping child processes...");
@@ -240,6 +254,7 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                         return proc.config.name == runtime_state.graph.name(id);
                     });
                     if (iter == processes.end() || !iter->has_process) continue;
+                    log_info("Dependency shutdown request `" + iter->config.name + "` for quit.");
                     iter->disable_restart = true;
                     std::string error;
                     if (!pm_tiny::win::request_program_termination(
@@ -256,8 +271,8 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                 if (proc.pipe_read[0] != nullptr || proc.pipe_read[1] != nullptr)
                     pm_tiny::win::poll_program_log(proc);
                 if (!proc.has_process) {
-                    if (proc.restart_pending && !shutdown_scheduled && !runtime_state.reload_pending &&
-                        now_ms >= proc.restart_due_ms) {
+                    if (due_restarts.count(proc.config.name) != 0 && proc.restart_pending &&
+                        !shutdown_scheduled && !runtime_state.reload_pending && now_ms >= proc.restart_due_ms) {
                         std::string launch_error;
                         if (pm_tiny::win::launch_program(proc, launch_error)) {
                             runtime_state.dependencies.mark_starting(proc.config.name);
@@ -284,23 +299,42 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                 const DWORD root_exit_code = proc.root_exit_code;
                 const bool root_status_ok = proc.root_exit_observed;
                 const bool root_active = !proc.root_exit_observed;
-                const bool start_timed_out = root_active && proc.termination.phase() == pm_tiny::termination_phase::none &&
-                    proc.config.start_timeout > 0 && !proc.ready &&
-                    now_ms - proc.launch_time_ms > static_cast<unsigned long long>(proc.config.start_timeout) * 1000ULL;
-                const bool heartbeat_timed_out = root_active && proc.termination.phase() == pm_tiny::termination_phase::none &&
-                    proc.config.heartbeat_timeout > 0 && proc.ready &&
-                    now_ms - proc.last_tick_ms > static_cast<unsigned long long>(proc.config.heartbeat_timeout) * 1000ULL;
-                if (start_timed_out || heartbeat_timed_out) {
-                    log_error("Program `" + proc.config.name + "` " +
-                              (start_timed_out ? "start timeout." : "heartbeat timeout."));
-                    std::string terminate_error;
-                    if (!pm_tiny::win::request_program_termination(
-                            proc, pm_tiny::win::CompletionAction::automatic, 1, terminate_error)) {
-                        log_error(terminate_error);
-                    } else if (!terminate_error.empty()) {
-                        pm_tiny::win::write_stderr_utf8("[WARN] " + proc.config.name + ": " + terminate_error + "\n");
+                const auto timeout = timeout_events.find(proc.config.name);
+                if (root_active && timeout != timeout_events.end() &&
+                    timeout->second.generation == proc.generation) {
+                    const auto timeout_name = timeout->second.kind == pm_tiny::lifecycle_timeout_kind::startup
+                        ? "start" : "heartbeat";
+                    if (timeout->second.action == pm_tiny::lifecycle_timeout_action::accept_ready) {
+                        log_info("Program `" + proc.config.name +
+                                 "` start timeout accepted as ready because failure_action is skip.");
+                        proc.ready = true;
+                        proc.last_tick_ms = now_ms;
+                        proc.heartbeat_action_due_ms = 0;
+                        const auto failures = pm_tiny::win::schedule_dependency_launch(
+                            processes, runtime_state, runtime_state.dependencies.mark_ready(proc.config.name));
+                        for (const auto &failure : failures)
+                            log_error("Failed to start dependency after `" + proc.config.name + "`: " + failure);
+                    } else if (timeout->second.action == pm_tiny::lifecycle_timeout_action::ignore) {
+                        proc.heartbeat_action_due_ms = now_ms +
+                            static_cast<unsigned long long>(std::max(1, proc.config.heartbeat_timeout)) * 1000ULL;
+                        log_info("Program `" + proc.config.name +
+                                 "` heartbeat timeout ignored because failure_action is skip.");
+                    } else if (timeout->second.action == pm_tiny::lifecycle_timeout_action::restart) {
+                        log_info("Program `" + proc.config.name + "` " + timeout_name +
+                                 " timeout restart requested.");
+                        std::string terminate_error;
+                        if (!pm_tiny::win::request_program_termination(
+                                proc, pm_tiny::win::CompletionAction::failure_restart, 1,
+                                terminate_error)) {
+                            log_error(terminate_error);
+                        } else if (!terminate_error.empty()) {
+                            pm_tiny::win::write_stderr_utf8(
+                                "[WARN] " + proc.config.name + ": " + terminate_error + "\n");
+                        }
+                    } else {
+                        log_error("Program `" + proc.config.name + "` requested unsupported Windows " +
+                                  timeout_name + " timeout reboot.");
                     }
-                    if (start_timed_out) runtime_state.dependencies.mark_failed(proc.config.name);
                 }
 
                 bool tree_empty = false;
@@ -350,8 +384,11 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                 const auto completed_runtime_ms = proc.launch_time_ms > 0 ? now_ms - proc.launch_time_ms : 0;
                 const bool automatic_restart = completion_action == pm_tiny::win::CompletionAction::automatic &&
                                                proc.config.daemon && !proc.disable_restart;
+                const bool failure_restart = completion_action ==
+                    pm_tiny::win::CompletionAction::failure_restart;
                 const bool should_restart = !shutdown_scheduled && !runtime_state.reload_pending &&
-                    (completion_action == pm_tiny::win::CompletionAction::restart || automatic_restart);
+                    (completion_action == pm_tiny::win::CompletionAction::restart ||
+                     failure_restart || automatic_restart);
                 log_info("Program `" + proc.config.name + "` generation " +
                          std::to_string(completed_generation) + " exited with code " +
                          std::to_string(root_status_ok ? root_exit_code : static_cast<DWORD>(-1)) + ".");
@@ -378,12 +415,15 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                         proc.restart_due_ms = decision.restart
                             ? now_ms + static_cast<unsigned long long>(decision.delay_ms) : 0;
                         if (decision.restart) {
+                            runtime_state.dependencies.mark_pending(proc.config.name);
                             log_info("Program `" + proc.config.name + "` restart scheduled in " +
                                      std::to_string(decision.delay_ms) + "ms (attempt " +
                                      std::to_string(decision.attempts_in_window) + ").");
                         } else {
                             log_error("Program `" + proc.config.name + "` automatic restart suppressed after " +
                                       std::to_string(decision.attempts_in_window) + " attempts.");
+                            if (failure_restart)
+                                runtime_state.dependencies.mark_failed(proc.config.name);
                         }
                     }
                     ++it;
@@ -430,8 +470,9 @@ int run_daemon(const pm_tiny::daemon_cli_options &options) {
                                 !control_server.persistence_busy();
         }
         if (shutdown_complete) break;
-        control_server.run_for(next_loop_wait_ms(processes, pm_tiny::win::monotonic_millis(),
-                                                 control_server.persistence_busy()));
+        const auto wait_plan = plan_process_lifecycle(
+            processes, pm_tiny::win::monotonic_millis(), control_server.persistence_busy());
+        control_server.run_for(static_cast<unsigned long>(wait_plan.next_wait_ms));
     }
 
     control_server.stop();

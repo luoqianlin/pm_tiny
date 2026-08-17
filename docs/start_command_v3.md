@@ -20,7 +20,7 @@ daemon 从继承快照移除 `PATH`、`SUDO_*` 和 `LD_*`，按目标 passwd 重
 `pm save` 持久化，reload 和自动重启保持一致；root 所有的文件配置及 sidecar 视为管理员显式输入。
 直接启动 `sudo`、`su` 或 `doas` 时 CLI 会警告，但不会阻止 `sudo -n` 等非交互用法。
 
-PTY 默认关闭。Linux/Android 可显式启用；启用 PTY 且未指定日志模式时自动使用 `combined`，显式组合 `pty: true` 与 `log_mode: split` 会失败。Windows 对 `--pty`、非空 `--user`、非零 `--oom-score-adj` 和非 `skip` 的 `--failure-action` 返回错误。
+PTY 默认关闭。Linux/Android 可显式启用；启用 PTY 且未指定日志模式时自动使用 `combined`，显式组合 `pty: true` 与 `log_mode: split` 会失败。Windows 对 `--pty`、非空 `--user`、非零 `--oom-score-adj` 和 `--failure-action reboot` 返回错误；`skip` 与 `restart` 均受支持。
 
 Linux/Android 与 Windows 的日志目录和文件名规则一致：空 `log_dir` 使用 daemon 的应用日志目录，`combined` 默认 `<name>.log`，`split` 默认 `<name>_stdout.log` 与 `<name>_stderr.log`；配置 `api.log` 时 split 派生为 `api_stdout.log` 与 `api_stderr.log`。当前文件无编号，`.1` 是最新历史文件。`log_archive_count` 表示历史文件数量，允许为 0。Windows 旧字段 `log_size_kb`、`log_files`、`log_file`、`log_file_count` 已删除并明确拒绝。
 

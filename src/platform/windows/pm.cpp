@@ -381,7 +381,7 @@ int wmain(int argc, wchar_t *wide_argv[]) {
     }
     if (parsed.command.kind == pm_tiny::cli::command_kind::start && parsed.command.start.create &&
         (!parsed.command.start.run_as.empty() || parsed.command.start.oom_score_adj != 0 ||
-         parsed.command.start.failure_action != pm_tiny::failure_action_t::SKIP)) {
+         parsed.command.start.failure_action == pm_tiny::failure_action_t::REBOOT)) {
         pm_tiny::win::write_stderr_utf8("pm: unsupported Windows start option\n");
         return EXIT_FAILURE;
     }

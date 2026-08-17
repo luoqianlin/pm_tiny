@@ -22,6 +22,7 @@ enum class CompletionAction {
     automatic,
     remove,
     restart,
+    failure_restart,
     delete_config
 };
 
@@ -42,6 +43,7 @@ struct ProcessHandle {
     bool ready = false;
     unsigned long long launch_time_ms = 0;
     unsigned long long last_tick_ms = 0;
+    unsigned long long heartbeat_action_due_ms = 0;
     unsigned long long generation = 0;
     unsigned long long watched_generation = 0;
     bool root_exit_observed = false;

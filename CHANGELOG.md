@@ -2,6 +2,25 @@
 
 All notable changes to PM_Tiny are documented in this file.
 
+## [4.1.1] - 2026-08-18
+
+### Added
+
+- Cross-platform DAG lifecycle regression coverage for multi-level blocking, recovery, dynamic mutation, and generation isolation.
+- Windows `failure_action: restart` support for startup and heartbeat timeouts, including runtime `pm start` validation.
+
+### Changed
+
+- Shared lifecycle orchestration keeps timeout handling and restart scheduling consistent across POSIX and Windows.
+- Windows capability and configuration validation now distinguish supported `skip`/`restart` actions from unsupported `reboot`.
+
+### Fixed
+
+- Heartbeat `skip` preserves the running process generation while avoiding repeated timeout log spam.
+- Suppressed failure-action restarts correctly mark the failed root and block only dependents that have not reached online state.
+
+[4.1.1]: https://github.com/luoqianlin/pm_tiny/compare/v4.1.0...v4.1.1
+
 ## [4.1.0] - 2026-08-17
 
 ### Added

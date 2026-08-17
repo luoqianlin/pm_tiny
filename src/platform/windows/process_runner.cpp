@@ -226,6 +226,7 @@ ProcessHandle &ProcessHandle::operator=(ProcessHandle &&other) noexcept {
         ready = other.ready;
         launch_time_ms = other.launch_time_ms;
         last_tick_ms = other.last_tick_ms;
+        heartbeat_action_due_ms = other.heartbeat_action_due_ms;
         generation = other.generation;
         watched_generation = other.watched_generation;
         root_exit_observed = other.root_exit_observed;
@@ -255,6 +256,7 @@ ProcessHandle &ProcessHandle::operator=(ProcessHandle &&other) noexcept {
         other.ready = false;
         other.launch_time_ms = 0;
         other.last_tick_ms = 0;
+        other.heartbeat_action_due_ms = 0;
         other.generation = 0;
         other.watched_generation = 0;
         other.root_exit_observed = false;
@@ -292,6 +294,7 @@ void ProcessHandle::reset() {
     ready = false;
     launch_time_ms = 0;
     last_tick_ms = 0;
+    heartbeat_action_due_ms = 0;
     termination = termination_job{};
     completion_action = CompletionAction::automatic;
     termination_exit_code = 0;
@@ -451,6 +454,7 @@ bool launch_program(ProcessHandle &handle, std::string &error_message) {
     if (has_launched_before) ++handle.restart_count;
     handle.launch_time_ms = monotonic_millis();
     handle.last_tick_ms = handle.launch_time_ms;
+    handle.heartbeat_action_due_ms = 0;
     for (int i = 0; i < stream_count; ++i) handle.pipe_read[i] = pipe_read[i];
 
     const auto default_log_dir = daemon_environment(PM_TINY_APP_LOG_DIR);

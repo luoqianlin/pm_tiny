@@ -94,6 +94,18 @@ function Wait-For-State([string]$Name, [string]$State, [int]$TimeoutSeconds, [st
     } $TimeoutSeconds $Description
 }
 
+function Assert-ShutdownOrder([string]$LogPath, [int]$StartLine, [string]$Dependent,
+                              [string]$Dependency, [string]$Reason) {
+    $text = (@(Get-Content -LiteralPath $LogPath | Select-Object -Skip $StartLine) -join "`n")
+    $dependentMarker = "Dependency shutdown request ``$Dependent`` for $Reason."
+    $dependencyMarker = "Dependency shutdown request ``$Dependency`` for $Reason."
+    $dependentIndex = $text.IndexOf($dependentMarker)
+    $dependencyIndex = $text.IndexOf($dependencyMarker)
+    if ($dependentIndex -lt 0 -or $dependencyIndex -lt 0 -or $dependentIndex -ge $dependencyIndex) {
+        throw "$Reason shutdown was not reverse-topological: $Dependent before $Dependency. Log: $text"
+    }
+}
+
 function Set-TestEnvironmentPaths([string]$ConfigPath) {
     $work = Split-Path -Parent $ConfigPath
     $env:PM_TINY_HOME = $work
@@ -288,6 +300,7 @@ function Run-MainProtocolScenario {
     }
     if ($daemonInfo.ipc.named_pipe.value -ne $env:PM_TINY_PIPE_NAME -or
         $daemonInfo.capabilities.pty -ne $false -or
+        $daemonInfo.capabilities.failure_action -ne $true -or
         $daemonInfo.capabilities.service_mode -ne $true) {
         throw "daemon info Windows configuration/capabilities mismatch"
     }
@@ -469,25 +482,205 @@ function Run-DependencyScenario {
     $work = Join-Path $ArtifactsDir "dependency"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     $config = Join-Path $work "pm_tiny.yaml"
-    Expand-Fixture "windows_dependency.yaml" $config @{ WORK_DIR = $work }
+    $repairable = Join-Path $work "repairable.exe"
+    $yaml = @"
+- name: root
+  executable: $(Yaml-Quote $SdkProbe)
+  args: ["--ready-delay-ms", "1200", "--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  start_timeout: 3
+- name: left
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [root]
+- name: right
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [root]
+- name: leaf
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [left, right]
+- name: bad
+  executable: $(Yaml-Quote $repairable)
+  args: ["--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+- name: blocked_child
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [bad]
+- name: blocked_grandchild
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [blocked_child]
+- name: side
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+- name: timeout_root
+  executable: $(Yaml-Quote $SdkProbe)
+  args: ["--ready-delay-ms", "5000", "--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  start_timeout: 1
+- name: timeout_child
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [timeout_root]
+- name: restart_root
+  executable: $(Yaml-Quote $SdkProbe)
+  args: ["--ready-delay-ms", "100", "--first-ready-delay-ms", "5000", "--generation-counter", $(Yaml-Quote (Join-Path $work "restart-generation.count")), "--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  start_timeout: 1
+  failure_action: restart
+  restart_delay_ms: 0
+  restart_max_delay_ms: 0
+- name: restart_child
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [restart_root]
+- name: restart_suppressed_root
+  executable: $(Yaml-Quote $SdkProbe)
+  args: ["--ready-delay-ms", "5000", "--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  start_timeout: 1
+  failure_action: restart
+  restart_delay_ms: 0
+  restart_max_delay_ms: 0
+  restart_window_ms: 10000
+  restart_max_attempts: 1
+- name: restart_suppressed_child
+  executable: ping.exe
+  args: ["-t", "127.0.0.1"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  depends_on: [restart_suppressed_root]
+"@
+    Write-TestConfig $config $yaml
     Start-TestDaemon "dependency" $config
-    Wait-For-State "child" "online" 10 "dependency child online state"
+    Wait-For {
+        $status = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+        $items = @{}; foreach ($item in $status.processes) { $items[$item.name] = $item }
+        $items.root.state -eq "starting" -and $items.left.state -eq "waiting" -and
+            $items.right.state -eq "waiting" -and $items.leaf.state -eq "waiting" -and
+            $items.bad.state -eq "failed" -and $items.blocked_child.state -eq "blocked" -and
+            $items.blocked_grandchild.state -eq "blocked" -and $items.side.state -eq "online" -and
+            $items.timeout_root.state -eq "starting" -and $items.timeout_child.state -eq "waiting" -and
+            $items.restart_root.state -eq "starting" -and $items.restart_child.state -eq "waiting" -and
+            $items.restart_suppressed_root.state -eq "starting" -and
+            $items.restart_suppressed_child.state -eq "waiting"
+    } 2 "dependency ready gate and recursive failure"
+    $timeoutBefore = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $timeoutRootBefore = @($timeoutBefore.processes | Where-Object { $_.name -eq "timeout_root" })[0]
+    Wait-For-State "leaf" "online" 10 "dependency diamond online state"
+    Wait-For-State "timeout_child" "online" 10 "skip timeout dependency unlock"
+    Wait-For-State "restart_child" "online" 12 "restart timeout dependency unlock"
+    Wait-For-State "restart_suppressed_root" "failed" 12 "restart timeout suppression"
+    Wait-For-State "restart_suppressed_child" "blocked" 5 "restart suppression dependency block"
+    $listJson = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $items = @{}; foreach ($item in $listJson.processes) { $items[$item.name] = $item }
+    $diamondGenerations = @{}
+    foreach ($name in @("left", "right", "leaf")) {
+        if ($items[$name].state -ne "online" -or $items[$name].generation -le 0) {
+            throw "dependency diamond did not reach a valid generation: $name"
+        }
+        $diamondGenerations[$name] = $items[$name].generation
+    }
+    Start-Sleep -Milliseconds 300
+    $stableList = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    foreach ($name in @("left", "right", "leaf")) {
+        $stable = @($stableList.processes | Where-Object { $_.name -eq $name })[0]
+        if ($stable.state -ne "online" -or $stable.generation -ne $diamondGenerations[$name]) {
+            throw "dependency diamond started more than once: $name"
+        }
+    }
     $list = Invoke-Pm @("list")
-    if ($list.IndexOf("base") -lt 0 -or $list.IndexOf("child") -lt 0 -or $list.IndexOf("base") -gt $list.IndexOf("child")) {
+    if ($list.IndexOf("root") -lt 0 -or $list.IndexOf("leaf") -lt 0 -or $list.IndexOf("root") -gt $list.IndexOf("leaf")) {
         throw "dependency order was not topological. Actual: $list"
     }
     $graph = Invoke-Pm @("graph", "--no-color")
-    Assert-Contains $graph "Dependency graph: 2 nodes, 1 edge" "dependency graph summary"
-    Assert-Contains $graph "child [online] <- base" "dependency graph edge"
-    $graphJson = Invoke-Pm @("graph", "base", "--json") | ConvertFrom-Json
-    if ($graphJson.focus -ne "base" -or @($graphJson.nodes).Count -ne 2 -or @($graphJson.edges).Count -ne 1) {
+    Assert-Contains $graph "Dependency graph: 14 nodes, 9 edges" "dependency graph summary"
+    Assert-Contains $graph "blocked_grandchild [blocked; blocked_by=bad]" "recursive failure root"
+    $suppressedBefore = (Invoke-Pm @("list", "--json") | ConvertFrom-Json).processes |
+        Where-Object { $_.name -eq "restart_suppressed_root" }
+    Assert-Contains (Invoke-Pm @("start", "restart_suppressed_root")) `
+        'started `restart_suppressed_root` pid=' "suppressed failure manual recovery"
+    Wait-For {
+        $entry = (Invoke-Pm @("list", "--json") | ConvertFrom-Json).processes |
+            Where-Object { $_.name -eq "restart_suppressed_root" }
+        $entry.state -eq "starting" -and $entry.generation -gt $suppressedBefore.generation -and
+            $entry.restart_attempts_in_window -eq 0 -and -not $entry.restart_suppressed
+    } 5 "suppressed failure policy reset"
+    $graphJson = Invoke-Pm @("graph", "root", "--json") | ConvertFrom-Json
+    if ($graphJson.focus -ne "root" -or @($graphJson.nodes).Count -ne 4 -or @($graphJson.edges).Count -ne 4) {
         throw "focused dependency graph JSON was invalid"
     }
     $dot = Invoke-Pm @("dag", "--dot")
-    Assert-Contains $dot '"base" -> "child";' "dependency graph DOT edge"
+    Assert-Contains $dot '"root" -> "left";' "dependency graph DOT edge"
     $missing = Invoke-PmFailure @("graph", "missing")
     Assert-Contains $missing "process not found: missing" "missing graph focus"
-    Stop-TestDaemon
+
+    Copy-Item -LiteralPath $SdkProbe -Destination $repairable
+    Assert-Contains (Invoke-Pm @("start", "bad")) 'started `bad` pid=' "failed root manual recovery"
+    Wait-For-State "blocked_grandchild" "online" 10 "recursive dependency recovery"
+    $timeoutAfter = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $timeoutRootAfter = @($timeoutAfter.processes | Where-Object { $_.name -eq "timeout_root" })[0]
+    if ($timeoutRootAfter.state -ne "online" -or $timeoutRootAfter.pid -ne $timeoutRootBefore.pid -or
+        $timeoutRootAfter.generation -ne $timeoutRootBefore.generation) {
+        throw "skip start timeout terminated or replaced timeout_root"
+    }
+    $restartRoot = @($timeoutAfter.processes | Where-Object { $_.name -eq "restart_root" })[0]
+    $restartChild = @($timeoutAfter.processes | Where-Object { $_.name -eq "restart_child" })[0]
+    if ($restartRoot.state -ne "online" -or $restartRoot.generation -lt 2 -or
+        $restartChild.state -ne "online" -or $restartChild.generation -le 0) {
+        throw "restart start timeout did not replace the root and unlock its child exactly once"
+    }
+    Start-Sleep -Milliseconds 300
+    $restartStable = (Invoke-Pm @("list", "--json") | ConvertFrom-Json).processes
+    $restartRootStable = @($restartStable | Where-Object { $_.name -eq "restart_root" })[0]
+    $restartChildStable = @($restartStable | Where-Object { $_.name -eq "restart_child" })[0]
+    if ($restartRootStable.generation -ne $restartRoot.generation -or
+        $restartChildStable.generation -ne $restartChild.generation) {
+        throw "restart start timeout launched a stable DAG node more than once"
+    }
+
+    $daemonLogPath = Join-Path $work "pm_tiny.log"
+    $reloadStartLine = @(Get-Content -LiteralPath $daemonLogPath).Count
+    Assert-Empty (Invoke-Pm @("reload", "--no-list")) "dependency reload"
+    Wait-For-State "leaf" "online" 10 "dependency leaf after reload"
+    Assert-ShutdownOrder $daemonLogPath $reloadStartLine "leaf" "root" "reload"
+
+    $quitStartLine = @(Get-Content -LiteralPath $daemonLogPath).Count
+    [void](Invoke-Pm @("quit"))
+    if (-not $script:DaemonProcess.WaitForExit(10000)) {
+        throw "dependency daemon did not exit after quit"
+    }
+    $script:DaemonProcess.WaitForExit()
+    $script:DaemonProcess.Refresh()
+    Assert-ShutdownOrder $daemonLogPath $quitStartLine "leaf" "root" "quit"
+    if ($null -ne $script:DaemonProcess.ExitCode -and $script:DaemonProcess.ExitCode -ne 0) {
+        throw "dependency daemon exited with $($script:DaemonProcess.ExitCode)"
+    }
+    $script:DaemonProcess = $null
 }
 
 function Run-LifecycleTransitionScenario {
@@ -590,9 +783,59 @@ function Run-DynamicDependencyDeleteScenario {
     Wait-For-State "dependency-base" "online" 10 "dynamic dependency base online"
     Wait-For-State "dependency-child" "online" 10 "dynamic dependency child online"
 
+    Assert-Contains (Invoke-Pm @("start", "failure-action-restart", "--failure-action", "restart",
+        "--no-daemon", "--", "ping.exe", "-t", "127.0.0.1")) `
+        'started `failure-action-restart` pid=' "dynamic failure_action restart acceptance"
+    Wait-For-State "failure-action-restart" "online" 10 "dynamic failure_action restart online"
+    Assert-Contains (Invoke-Pm @("inspect", "failure-action-restart")) "restart" `
+        "dynamic failure_action restart inspect"
+    Assert-Empty (Invoke-Pm @("delete", "failure-action-restart", "--no-list")) `
+        "dynamic failure_action restart cleanup"
+
     Assert-Empty (Invoke-Pm @("save")) "dynamic dependency save"
     $programPath = Join-Path $work "prog.yaml"
     $savedBeforeDelete = Get-Content $programPath -Raw
+
+    $runtimeSnapshot = {
+        $data = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+        $values = foreach ($item in $data.processes) {
+            [ordered]@{
+                name = $item.name
+                state = $item.state
+                pid = $item.pid
+                generation = $item.generation
+                depends_on = @($item.depends_on)
+            }
+        }
+        return ($values | ConvertTo-Json -Depth 5 -Compress)
+    }
+    $mutationRuntimeBefore = & $runtimeSnapshot
+    $mutationGraphBefore = Invoke-Pm @("graph", "--json") |
+        ConvertFrom-Json | ConvertTo-Json -Depth 10 -Compress
+    $invalidStarts = @(
+        ,@("start", "missing-dependent", "--depends-on", "absent", "--no-daemon", "--",
+            "ping.exe", "-t", "127.0.0.1"),
+        ,@("start", "duplicate-dependent", "--depends-on", "dependency-base", "--depends-on",
+            "dependency-base", "--no-daemon", "--", "ping.exe", "-t", "127.0.0.1"),
+        ,@("start", "spawn-failure", "--depends-on", "dependency-base", "--no-daemon", "--",
+            "Z:\missing\pm_tiny_dependency.exe"),
+        ,@("start", "unsupported-reboot", "--failure-action", "reboot", "--no-daemon", "--",
+            "ping.exe", "-t", "127.0.0.1")
+    )
+    foreach ($arguments in $invalidStarts) {
+        [void](Invoke-PmExpectedFailure $arguments)
+        if ((& $runtimeSnapshot) -ne $mutationRuntimeBefore) {
+            throw "rejected dynamic dependency start changed runtime state: $($arguments -join ' ')"
+        }
+        $graphAfter = Invoke-Pm @("graph", "--json") |
+            ConvertFrom-Json | ConvertTo-Json -Depth 10 -Compress
+        if ($graphAfter -ne $mutationGraphBefore) {
+            throw "rejected dynamic dependency start changed graph: $($arguments -join ' ')"
+        }
+        if ((Get-Content $programPath -Raw) -ne $savedBeforeDelete) {
+            throw "rejected dynamic dependency start changed persisted configuration"
+        }
+    }
 
     $beforeInvalidReload = Invoke-Pm @("list", "--json") | ConvertFrom-Json
     $beforeInvalidBase = @($beforeInvalidReload.processes |
@@ -858,22 +1101,56 @@ function Run-SdkScenario {
     $work = Join-Path $ArtifactsDir "sdk"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     $config = Join-Path $work "pm_tiny.yaml"
-    Expand-Fixture "windows_sdk_managed.yaml" $config @{
-        SDK_PROBE = $SdkProbe
-        WORK_DIR = $work
-        LOG_DIR = (Join-Path $work "logs")
-    }
+    $skipCounter = Join-Path $work "skip-generation.count"
+    $restartCounter = Join-Path $work "restart-generation.count"
+    Write-TestConfig $config @"
+- name: sdk_skip
+  executable: $(Yaml-Quote $SdkProbe)
+  args: ["--generation-counter", $(Yaml-Quote $skipCounter), "--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  start_timeout: 2
+  heartbeat_timeout: 1
+  failure_action: skip
+- name: sdk_restart
+  executable: $(Yaml-Quote $SdkProbe)
+  args: ["--generation-counter", $(Yaml-Quote $restartCounter), "--final-wait-ms", "60000"]
+  cwd: $(Yaml-Quote $work)
+  daemon: false
+  start_timeout: 2
+  heartbeat_timeout: 1
+  failure_action: restart
+  restart_delay_ms: 0
+  restart_max_delay_ms: 0
+"@
     Start-TestDaemon "sdk" $config
     Wait-For {
         $status = Invoke-Pm @("list", "--json") | ConvertFrom-Json
-        @($status.processes | Where-Object { $_.name -eq "sdk_probe" -and $_.state -eq "online" }).Count -eq 1
-    } 5 "SDK ready signal"
+        @($status.processes | Where-Object { $_.name -eq "sdk_skip" -and $_.state -eq "online" }).Count -eq 1 -and
+            @($status.processes | Where-Object { $_.name -eq "sdk_restart" -and $_.state -eq "online" }).Count -eq 1
+    } 5 "SDK ready signals"
+    $before = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $skipBefore = @($before.processes | Where-Object { $_.name -eq "sdk_skip" })[0]
     Wait-For {
         $status = Invoke-Pm @("list", "--json") | ConvertFrom-Json
-        @($status.processes | Where-Object { $_.name -eq "sdk_probe" -and $_.state -eq "stopped" }).Count -eq 1
-    } 8 "SDK heartbeat timeout"
-    $daemonLog = Get-Content (Join-Path $ArtifactsDir "sdk-daemon.stderr.log") -Raw
-    Assert-Contains $daemonLog "heartbeat timeout" "SDK heartbeat policy"
+        $restart = @($status.processes | Where-Object { $_.name -eq "sdk_restart" })[0]
+        $restart.state -eq "online" -and $restart.generation -ge 2
+    } 10 "SDK heartbeat restart"
+    $after = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $skipAfter = @($after.processes | Where-Object { $_.name -eq "sdk_skip" })[0]
+    if ($skipAfter.state -ne "online" -or $skipAfter.pid -ne $skipBefore.pid -or
+        $skipAfter.generation -ne $skipBefore.generation) {
+        throw "heartbeat skip terminated or replaced sdk_skip"
+    }
+    $daemonLogPath = Join-Path $work "pm_tiny.log"
+    Wait-For {
+        $content = Get-Content $daemonLogPath -Raw
+        $content.Contains("heartbeat timeout ignored because failure_action is skip") -and
+            $content.Contains("heartbeat timeout restart requested")
+    } 5 "SDK heartbeat policy logs"
+    $daemonLog = Get-Content $daemonLogPath -Raw
+    Assert-Contains $daemonLog "heartbeat timeout ignored because failure_action is skip" "SDK heartbeat skip"
+    Assert-Contains $daemonLog "heartbeat timeout restart requested" "SDK heartbeat restart"
     Stop-TestDaemon
 }
 
@@ -884,12 +1161,20 @@ function Run-StartTimeoutScenario {
     $config = Join-Path $work "pm_tiny.yaml"
     Expand-Fixture "windows_start_timeout.yaml" $config @{ WORK_DIR = $work }
     Start-TestDaemon "start-timeout" $config
+    $before = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $beforeItem = @($before.processes | Where-Object { $_.name -eq "never_ready" })[0]
+    if ($beforeItem.state -ne "starting") { throw "start timeout fixture was not initially starting" }
     Wait-For {
         $status = Invoke-Pm @("list", "--json") | ConvertFrom-Json
-        @($status.processes | Where-Object { $_.name -eq "never_ready" -and $_.state -eq "failed" }).Count -eq 1
-    } 8 "start timeout termination"
-    $daemonLog = Get-Content (Join-Path $ArtifactsDir "start-timeout-daemon.stderr.log") -Raw
-    Assert-Contains $daemonLog "start timeout" "start timeout policy"
+        @($status.processes | Where-Object { $_.name -eq "never_ready" -and $_.state -eq "online" }).Count -eq 1
+    } 8 "skip start timeout acceptance"
+    $after = Invoke-Pm @("list", "--json") | ConvertFrom-Json
+    $afterItem = @($after.processes | Where-Object { $_.name -eq "never_ready" })[0]
+    if ($afterItem.pid -ne $beforeItem.pid -or $afterItem.generation -ne $beforeItem.generation) {
+        throw "skip start timeout replaced the running process"
+    }
+    $daemonLog = Get-Content (Join-Path $work "pm_tiny.log") -Raw
+    Assert-Contains $daemonLog "start timeout accepted as ready because failure_action is skip" "start timeout policy"
     Stop-TestDaemon
 }
 
@@ -907,6 +1192,23 @@ function Run-UnsupportedScenario {
     if ($process.ExitCode -eq 0) { throw "unsupported configuration unexpectedly started daemon" }
     $daemonLog = Get-Content (Join-Path $ArtifactsDir "unsupported-daemon.stderr.log") -Raw
     Assert-Contains $daemonLog "pty: true" "unsupported Windows configuration"
+
+    Write-TestConfig $config @"
+- name: unsupported_reboot
+  executable: cmd.exe
+  args: ["/c", "exit", "0"]
+  cwd: $(Yaml-Quote $work)
+  failure_action: reboot
+"@
+    Set-TestEnvironmentPaths $config
+    $rebootStdout = Join-Path $ArtifactsDir "unsupported-reboot.stdout.log"
+    $rebootStderr = Join-Path $ArtifactsDir "unsupported-reboot.stderr.log"
+    $reboot = Start-Process -FilePath $Daemon -ArgumentList @("--config", ('"' + $config + '"')) `
+        -WorkingDirectory $ArtifactsDir -RedirectStandardOutput $rebootStdout `
+        -RedirectStandardError $rebootStderr -PassThru -Wait
+    if ($reboot.ExitCode -eq 0) { throw "failure_action reboot unexpectedly started Windows daemon" }
+    Assert-Contains (Get-Content $rebootStderr -Raw) "supported values: skip, restart" `
+        "unsupported Windows failure_action reboot"
 
     Write-TestConfig $config @"
 - name: removed_environment
@@ -1302,6 +1604,8 @@ try {
         Run-HighProcessCountScenario
     } elseif ($Scenario -eq "lifecycle-transitions") {
         Run-LifecycleTransitionScenario
+    } elseif ($Scenario -eq "dependency-runtime") {
+        Run-DependencyScenario
     } elseif ($Scenario -eq "dependency-mutations" -or $Scenario -eq "dynamic-dependency-delete") {
         Run-DynamicDependencyDeleteScenario
     } elseif ($Scenario -eq "concurrent-controls") {

@@ -340,7 +340,13 @@ void ControlServer::handle_async_request(const std::shared_ptr<AsyncNamedPipeSes
         }
         runtime_state_.reload_pending = true;
         runtime_state_.reload_programs = std::move(loaded.programs);
-        for (auto iter = processes_.rbegin(); iter != processes_.rend(); ++iter) {
+        for (const auto id : runtime_state_.graph.reverse_topological_order()) {
+            auto iter = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &process) {
+                return process.config.name == runtime_state_.graph.name(id);
+            });
+            if (iter == processes_.end() || !iter->has_process) continue;
+            daemon_log_message(daemon_log_level_t::info,
+                               "Dependency shutdown request `" + iter->config.name + "` for reload.");
             iter->disable_restart = true;
             std::string error;
             request_program_termination(*iter, CompletionAction::remove, 0, error);
@@ -734,7 +740,7 @@ pm_tiny::protocol_message ControlServer::handle_info(const pm_tiny::protocol_mes
         log.sink == "console_fallback" ? daemon_log_sink::console_fallback : daemon_log_sink::console;
     snapshot.log_degraded = log.degraded; snapshot.log_last_error = log.last_error;
     snapshot.dynamic_create = true; snapshot.pty = false; snapshot.switch_user = false;
-    snapshot.oom_adjust = false; snapshot.failure_action = false; snapshot.service_mode = true;
+    snapshot.oom_adjust = false; snapshot.failure_action = true; snapshot.service_mode = true;
     snapshot.process_tree_backends = {"job_object"};
     auto response = make_control_response(request, 0, "success");
     append_daemon_info(response.payload, snapshot);
@@ -820,7 +826,8 @@ pm_tiny::protocol_message ControlServer::handle_start(const pm_tiny::protocol_me
     if (request.mode == start_mode::create) static_cast<prog_cfg_t &>(cfg) = request.config;
     cfg.name = request.name;
     if (cfg.executable.empty()) return fail("missing executable");
-    if (!cfg.run_as.empty() || cfg.oom_score_adj != 0 || cfg.pty || cfg.failure_action != failure_action_t::SKIP)
+    if (!cfg.run_as.empty() || cfg.oom_score_adj != 0 || cfg.pty ||
+        cfg.failure_action == failure_action_t::REBOOT)
         return fail("unsupported Windows start option");
     if (request.mode == start_mode::create) cfg.envs = request.inherited_env;
     const auto current_process = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &item) {
@@ -983,7 +990,13 @@ std::string ControlServer::handle_reload() {
     if (runtime_state_.reload_pending || should_stop_.load()) return "ERR daemon is busy\n";
     runtime_state_.reload_pending = true;
     runtime_state_.reload_programs = std::move(loaded.programs);
-    for (auto iter = processes_.rbegin(); iter != processes_.rend(); ++iter) {
+    for (const auto id : runtime_state_.graph.reverse_topological_order()) {
+        auto iter = std::find_if(processes_.begin(), processes_.end(), [&](const ProcessHandle &process) {
+            return process.config.name == runtime_state_.graph.name(id);
+        });
+        if (iter == processes_.end() || !iter->has_process) continue;
+        daemon_log_message(daemon_log_level_t::info,
+                           "Dependency shutdown request `" + iter->config.name + "` for reload.");
         iter->disable_restart = true;
         std::string error;
         if (!request_program_termination(*iter, CompletionAction::remove, 0, error)) {
@@ -1002,6 +1015,7 @@ std::string ControlServer::handle_app_signal(const std::string &name, bool ready
     });
     if (found == processes_.end() || !found->has_process) return "ERR process not found\n";
     found->last_tick_ms = monotonic_millis();
+    found->heartbeat_action_due_ms = 0;
     if (ready_signal) {
         found->ready = true;
         const auto failures = schedule_dependency_launch(

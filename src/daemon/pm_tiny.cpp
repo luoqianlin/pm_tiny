@@ -13,6 +13,7 @@
 #include "android_lmkd.h"
 #include "process_reaper.h"
 #include "daemon_config.h"
+#include "lifecycle_orchestrator.h"
 
 using prog_ptr_t = pm_tiny::prog_ptr_t;
 using proglist_t = pm_tiny::proglist_t;
@@ -235,12 +236,45 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
             tiny_server.remove_prog(p);
         }
     }
-    proglist_t starting_prog;
-    bool reboot = false;
-    for (auto &prog: pm_tiny_progs) {
-        if (prog->restart_pending && prog->instance.pid == -1 &&
-            prog->is_tree_empty() && !tiny_server.is_exiting() &&
-            pm_tiny::time::gettime_monotonic_ms() >= prog->restart_due_ms) {
+    const auto now_ms = pm_tiny::time::gettime_monotonic_ms();
+    std::vector<prog_ptr_t> ordered_progs(pm_tiny_progs.begin(), pm_tiny_progs.end());
+    std::vector<pm_tiny::lifecycle_process_observation> observations;
+    observations.reserve(ordered_progs.size());
+    for (std::size_t index = 0; index < ordered_progs.size(); ++index) {
+        const auto &prog = ordered_progs[index];
+        pm_tiny::lifecycle_process_observation observation;
+        observation.process_index = index;
+        observation.generation = prog->instance.generation;
+        observation.has_process = prog->instance.pid != -1;
+        observation.starting = prog->state == PM_TINY_PROG_STATE_STARTING;
+        observation.online = prog->state == PM_TINY_PROG_STATE_RUNING;
+        observation.terminating = prog->state == PM_TINY_PROG_STATE_REQUEST_STOP ||
+                                  prog->state == PM_TINY_PROG_STATE_REQUEST_DELETE;
+        const auto phase = prog->instance.job.phase();
+        observation.tree_draining = phase == pm_tiny::termination_phase::tree_draining ||
+                                    phase == pm_tiny::termination_phase::force_kill_requested;
+        if (phase == pm_tiny::termination_phase::term_requested ||
+            phase == pm_tiny::termination_phase::tree_draining)
+            observation.termination_due_ms = prog->instance.job.deadline_ms();
+        observation.restart_pending = prog->restart_pending;
+        observation.restart_due_ms = prog->restart_due_ms;
+        observation.launch_time_ms = prog->last_startup_ms;
+        observation.last_tick_ms = prog->last_tick_timepoint;
+        observation.heartbeat_action_due_ms = prog->heartbeat_action_due_ms;
+        observation.start_timeout_s = prog->start_timeout;
+        observation.heartbeat_timeout_s = prog->heartbeat_timeout;
+        observation.failure_action = prog->failure_action;
+        observations.push_back(observation);
+    }
+    const auto lifecycle_plan = pm_tiny::plan_lifecycle_tick(
+        now_ms, observations, tiny_server.persistence_busy());
+
+    if (!tiny_server.is_exiting()) {
+        for (const auto index : lifecycle_plan.due_restarts) {
+            if (index >= ordered_progs.size()) continue;
+            auto prog = ordered_progs[index];
+            if (!prog->restart_pending || prog->instance.pid != -1 || !prog->is_tree_empty() ||
+                now_ms < prog->restart_due_ms) continue;
             int ret = tiny_server.start_prog(prog);
             prog->restart_pending = false;
             prog->restart_due_ms = 0;
@@ -249,8 +283,62 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                 prog->fail_pending_log_sessions("failed to start the next generation");
                 tiny_server.flag_startup_fail(prog);
             }
-            continue;
         }
+    }
+
+    proglist_t starting_prog;
+    bool reboot = false;
+    for (const auto &event : lifecycle_plan.timeouts) {
+        if (tiny_server.is_exiting() || event.process_index >= ordered_progs.size()) continue;
+        auto prog = ordered_progs[event.process_index];
+        if (prog->instance.generation != event.generation || prog->instance.pid == -1) continue;
+        if (event.action == pm_tiny::lifecycle_timeout_action::accept_ready) {
+            starting_prog.push_back(prog);
+            prog->state = PM_TINY_PROG_STATE_RUNING;
+            prog->last_tick_timepoint = now_ms;
+            prog->heartbeat_action_due_ms = 0;
+            PM_TINY_DLOG_INFO("`%s` start timeout accepted as ready because failure_action is skip",
+                              prog->name.c_str());
+        } else if (event.action == pm_tiny::lifecycle_timeout_action::ignore) {
+            prog->heartbeat_action_due_ms = now_ms +
+                static_cast<int64_t>(std::max(1, prog->heartbeat_timeout)) * 1000;
+            PM_TINY_DLOG_INFO("`%s` heartbeat timeout ignored because failure_action is skip",
+                              prog->name.c_str());
+        } else if (event.action == pm_tiny::lifecycle_timeout_action::restart) {
+            const auto timeout_name = event.kind == pm_tiny::lifecycle_timeout_kind::startup
+                ? "start" : "heartbeat";
+            PM_TINY_DLOG_INFO("`%s` %s timeout restart requested",
+                              prog->name.c_str(), timeout_name);
+            prog->async_kill_prog();
+            prog->enqueue_after_termination(
+                [prog, timeout_name](pm_tiny_server_t &server) mutable {
+                    const auto restart_now_ms = pm_tiny::time::gettime_monotonic_ms();
+                    const auto runtime_ms = restart_now_ms - prog->last_startup_ms;
+                    const auto decision = prog->plan_automatic_restart(restart_now_ms, runtime_ms);
+                    if (decision.restart) {
+                        ++prog->dead_count;
+                        prog->state = PM_TINY_PROG_STATE_WAITING_START;
+                        PM_TINY_DLOG_INFO("`%s` %s timeout restart scheduled in %dms (attempt %d)",
+                                          prog->name.c_str(), timeout_name, decision.delay_ms,
+                                          decision.attempts_in_window);
+                    } else {
+                        PM_TINY_DLOG_ERROR("`%s` %s timeout restart suppressed after %d attempts",
+                                           prog->name.c_str(), timeout_name,
+                                           decision.attempts_in_window);
+                        server.flag_startup_fail(prog);
+                    }
+                });
+        } else if (event.action == pm_tiny::lifecycle_timeout_action::reboot) {
+            const auto timeout_name = event.kind == pm_tiny::lifecycle_timeout_kind::startup
+                ? "start" : "heartbeat";
+            PM_TINY_DLOG_INFO("`%s` %s timeout reboot now.", prog->name.c_str(), timeout_name);
+            pm_tiny::process_reboot();
+            reboot = true;
+            break;
+        }
+    }
+
+    for (auto &prog: pm_tiny_progs) {
         if (prog->state == PM_TINY_PROG_STATE_REQUEST_STOP
             || prog->state == PM_TINY_PROG_STATE_REQUEST_DELETE) {
             auto termination_action = prog->poll_termination();
@@ -260,78 +348,6 @@ void check_delayed_chld_sig(pm_tiny_server_t &tiny_server) {
                 prog->execute_penddingtasks(tiny_server);
             } else if (termination_action == pm_tiny::termination_action::send_kill) {
                 prog->async_force_kill();
-            }
-        } else {
-            if (tiny_server.is_exiting()) {
-                continue;
-            }
-            if (prog->state == PM_TINY_PROG_STATE_STARTING) {
-                if (prog->instance.pid != -1 && prog->is_start_timeout()) {
-                    if (prog->failure_action == pm_tiny::failure_action_t::SKIP
-                        || prog->start_timeout == 0) {
-                        starting_prog.push_back(prog);
-                        prog->state = PM_TINY_PROG_STATE_RUNING;
-                        prog->last_tick_timepoint = pm_tiny::time::gettime_monotonic_ms();
-                        PM_TINY_DLOG_DEBUG("start timeout:%s", prog->name.c_str());
-                    } else if (prog->failure_action == pm_tiny::failure_action_t::RESTART) {
-                        prog->async_kill_prog();
-                        auto start_prog_task =
-                                [&prog](pm_tiny_server_t &) {
-                                    const auto now_ms = pm_tiny::time::gettime_monotonic_ms();
-                                    const auto runtime_ms = now_ms - prog->last_startup_ms;
-                                    const auto decision = prog->plan_automatic_restart(now_ms, runtime_ms);
-                                    if (decision.restart) {
-                                        ++prog->dead_count;
-                                        prog->state = PM_TINY_PROG_STATE_WAITING_START;
-                                        PM_TINY_DLOG_INFO("`%s` timeout restart scheduled in %dms (attempt %d)",
-                                                      prog->name.c_str(), decision.delay_ms,
-                                                      decision.attempts_in_window);
-                                    } else {
-                                        prog->state = PM_TINY_PROG_STATE_STOPED;
-                                        PM_TINY_DLOG_ERROR("`%s` timeout restart suppressed after %d attempts",
-                                                      prog->name.c_str(), decision.attempts_in_window);
-                                    }
-                                };
-                        prog->enqueue_after_termination(start_prog_task);
-                    } else {
-                        PM_TINY_DLOG_INFO("`%s` start timeout reboot now.", prog->name.c_str());
-                        pm_tiny::process_reboot();
-                        reboot = true;
-                        break;
-                    }
-                }
-            } else if (prog->state == PM_TINY_PROG_STATE_RUNING) {
-                if (prog->instance.pid != -1 && prog->is_tick_timeout()) {
-                    if (prog->failure_action == pm_tiny::failure_action_t::RESTART) {
-                        PM_TINY_DLOG_INFO("`%s` tick timeout restart now.", prog->name.c_str());
-                        prog->async_kill_prog();
-                        auto start_prog_task =
-                                [&prog](pm_tiny_server_t &) {
-                                    const auto now_ms = pm_tiny::time::gettime_monotonic_ms();
-                                    const auto runtime_ms = now_ms - prog->last_startup_ms;
-                                    const auto decision = prog->plan_automatic_restart(now_ms, runtime_ms);
-                                    if (decision.restart) {
-                                        ++prog->dead_count;
-                                        prog->state = PM_TINY_PROG_STATE_WAITING_START;
-                                        PM_TINY_DLOG_INFO("`%s` timeout restart scheduled in %dms (attempt %d)",
-                                                      prog->name.c_str(), decision.delay_ms,
-                                                      decision.attempts_in_window);
-                                    } else {
-                                        prog->state = PM_TINY_PROG_STATE_STOPED;
-                                        PM_TINY_DLOG_ERROR("`%s` timeout restart suppressed after %d attempts",
-                                                      prog->name.c_str(), decision.attempts_in_window);
-                                    }
-                                };
-                        prog->enqueue_after_termination(start_prog_task);
-                    } else if (prog->failure_action == pm_tiny::failure_action_t::REBOOT) {
-                        PM_TINY_DLOG_INFO("`%s` tick timeout reboot now.", prog->name.c_str());
-                        pm_tiny::process_reboot();
-                        reboot = true;
-                        break;
-                    } else if (prog->failure_action == pm_tiny::failure_action_t::SKIP) {
-//                    PM_TINY_DLOG_INFO("`%s` tick timeout skip.", prog->name.c_str());
-                    }
-                }
             }
         }
     }
@@ -382,30 +398,34 @@ int next_maintenance_delay_ms(const pm_tiny_server_t &server) {
     if (server.is_exiting()) return 25;
     if (server.persistence_busy()) return 10;
     const int64_t now = pm_tiny::time::gettime_monotonic_ms();
-    int64_t next_due = now + 1000;
-    bool tree_draining = false;
+    std::vector<pm_tiny::lifecycle_process_observation> observations;
+    std::size_t index = 0;
     for (const auto &prog : server.pm_tiny_progs) {
-        if (prog->restart_pending) next_due = std::min(next_due, prog->restart_due_ms);
-        if (prog->state == PM_TINY_PROG_STATE_STARTING && prog->instance.pid != -1 &&
-            prog->start_timeout >= 0) {
-            next_due = std::min(next_due, prog->last_startup_ms +
-                static_cast<int64_t>(prog->start_timeout) * 1000);
-        }
-        if (prog->state == PM_TINY_PROG_STATE_RUNING && prog->heartbeat_timeout > 0) {
-            next_due = std::min(next_due, prog->last_tick_timepoint +
-                static_cast<int64_t>(prog->heartbeat_timeout) * 1000);
-        }
+        pm_tiny::lifecycle_process_observation observation;
+        observation.process_index = index++;
+        observation.generation = prog->instance.generation;
+        observation.has_process = prog->instance.pid != -1;
+        observation.starting = prog->state == PM_TINY_PROG_STATE_STARTING;
+        observation.online = prog->state == PM_TINY_PROG_STATE_RUNING;
+        observation.terminating = prog->state == PM_TINY_PROG_STATE_REQUEST_STOP ||
+                                  prog->state == PM_TINY_PROG_STATE_REQUEST_DELETE;
         const auto phase = prog->instance.job.phase();
-        if (phase == pm_tiny::termination_phase::term_requested) {
-            next_due = std::min(next_due, prog->instance.job.deadline_ms());
-        } else if (phase == pm_tiny::termination_phase::tree_draining ||
-                   phase == pm_tiny::termination_phase::force_kill_requested) {
-            tree_draining = true;
-        }
+        observation.tree_draining = phase == pm_tiny::termination_phase::tree_draining ||
+                                    phase == pm_tiny::termination_phase::force_kill_requested;
+        if (phase == pm_tiny::termination_phase::term_requested ||
+            phase == pm_tiny::termination_phase::tree_draining)
+            observation.termination_due_ms = prog->instance.job.deadline_ms();
+        observation.restart_pending = prog->restart_pending;
+        observation.restart_due_ms = prog->restart_due_ms;
+        observation.launch_time_ms = prog->last_startup_ms;
+        observation.last_tick_ms = prog->last_tick_timepoint;
+        observation.heartbeat_action_due_ms = prog->heartbeat_action_due_ms;
+        observation.start_timeout_s = prog->start_timeout;
+        observation.heartbeat_timeout_s = prog->heartbeat_timeout;
+        observation.failure_action = prog->failure_action;
+        observations.push_back(observation);
     }
-    if (tree_draining) return 25;
-    if (next_due <= now) return 1;
-    return static_cast<int>(std::min<int64_t>(1000, next_due - now));
+    return pm_tiny::plan_lifecycle_tick(now, observations, server.persistence_busy()).next_wait_ms;
 }
 
 int open_uds_listen_fd(const std::string &sock_path

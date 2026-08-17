@@ -26,94 +26,186 @@ std::vector<std::string> names(const pm_tiny::dependency_graph &graph,
     return result;
 }
 
-} // namespace
-
-int main() {
+void test_validation_and_atomic_build() {
     using namespace pm_tiny;
     dependency_graph graph;
     dependency_error error;
-    expect(dependency_graph::build({}, graph, error) && graph.empty(), "empty graph should be valid");
+    expect(dependency_graph::build({node("preserved")}, graph, error), "baseline graph should build");
 
-    const std::vector<dependency_node_config> diamond = {
-        node("right", {"root"}), node("root"), node("left", {"root"}), node("leaf", {"left", "right"})
+    struct invalid_case {
+        std::vector<dependency_node_config> nodes;
+        dependency_error_code code;
+        const char *message;
+        std::vector<std::string> cycle;
     };
-    expect(dependency_graph::build(diamond, graph, error), "diamond should be valid");
-    expect(names(graph, graph.topological_order()) == std::vector<std::string>({"root", "right", "left", "leaf"}),
-           "topological order should be stable");
-    expect(names(graph, graph.reverse_topological_order()) == std::vector<std::string>({"leaf", "left", "right", "root"}),
-           "reverse order mismatch");
-    expect(names(graph, graph.transitive_dependents(graph.find("root"))) ==
-           std::vector<std::string>({"right", "left", "leaf"}), "transitive dependents mismatch");
+    const std::vector<invalid_case> cases = {
+        {{node("")}, dependency_error_code::empty_name, "Program name cannot be empty", {}},
+        {{node("dup"), node("dup")}, dependency_error_code::duplicate_name,
+         "Duplicate program name: dup", {}},
+        {{node("app", {"dep", "dep"}), node("dep")}, dependency_error_code::duplicate_dependency,
+         "Program `app` has duplicate dependency `dep`", {}},
+        {{node("self", {"self"})}, dependency_error_code::self_dependency,
+         "Program `self` cannot depend on itself", {}},
+        {{node("app", {"missing"})}, dependency_error_code::missing_dependency,
+         "Program `app` depends on missing `missing`", {}},
+        {{node("a", {"b"}), node("b", {"c"}), node("c", {"a"})}, dependency_error_code::cycle,
+         "Program dependency cycle detected: a -> b -> c -> a", {"a", "b", "c", "a"}},
+    };
+    for (const auto &item : cases) {
+        expect(!dependency_graph::build(item.nodes, graph, error), "invalid graph should fail");
+        expect(error.code == item.code, "validation error code mismatch");
+        expect(error.message == item.message, "validation error message mismatch");
+        expect(error.cycle_path == item.cycle, "validation cycle path mismatch");
+        expect(graph.size() == 1 && graph.name(0) == "preserved",
+               "failed build must not replace the previous graph");
+    }
 
+    expect(dependency_graph::build({}, graph, error) && graph.empty(), "empty graph should be valid");
+    expect(error.code == dependency_error_code::none && error.message.empty() && error.cycle_path.empty(),
+           "successful build should clear the previous error");
+}
+
+void test_stable_orders_and_queries() {
+    using namespace pm_tiny;
+    dependency_graph graph;
+    dependency_error error;
+    const std::vector<dependency_node_config> complex = {
+        node("unrelated"), node("right", {"root"}), node("root"), node("left", {"root"}),
+        node("merge", {"left", "right"}), node("tail", {"merge"}), node("second", {"left", "unrelated"})
+    };
+    expect(dependency_graph::build(complex, graph, error), "complex graph should build");
+    expect(graph.find("missing") == dependency_graph::npos, "missing lookup should return npos");
+    expect(names(graph, graph.topological_order()) ==
+           std::vector<std::string>({"unrelated", "root", "right", "left", "merge", "tail", "second"}),
+           "stable topological order mismatch");
+    expect(names(graph, graph.reverse_topological_order()) ==
+           std::vector<std::string>({"second", "tail", "merge", "left", "right", "root", "unrelated"}),
+           "stable reverse topological order mismatch");
+    expect(names(graph, graph.transitive_dependents(graph.find("root"))) ==
+           std::vector<std::string>({"right", "left", "merge", "tail", "second"}),
+           "transitive dependent order mismatch");
+    expect(graph.dependencies(graph.find("unrelated")).empty(), "independent node should have no dependency");
+}
+
+void test_runtime_transitions_and_closure() {
+    using namespace pm_tiny;
+    dependency_graph graph;
+    dependency_error error;
+    expect(dependency_graph::build({node("side"), node("root"), node("middle", {"root"}),
+                                    node("leaf", {"middle"})}, graph, error), "chain graph should build");
     dependency_runtime runtime(graph);
-    expect(runtime.request_all() == std::vector<std::string>({"root"}), "only root should start initially");
-    expect(runtime.mark_ready("root") == std::vector<std::string>({"right", "left"}), "both branches should unlock");
-    expect(runtime.mark_ready("right").empty(), "leaf must wait for both dependencies");
-    expect(runtime.mark_ready("left") == std::vector<std::string>({"leaf"}), "leaf should unlock once");
-    expect(runtime.mark_ready("left").empty(), "ready must be idempotent");
+    expect(runtime.all_terminal(), "idle runtime should be terminal");
+    expect(runtime.request_closure("missing").empty(), "missing closure should be empty");
+    expect(runtime.request_closure("leaf") == std::vector<std::string>({"root"}),
+           "target closure should start only its root");
+    expect(runtime.state("side") == dependency_runtime_state::idle,
+           "target closure must not request unrelated nodes");
+    expect(!runtime.all_terminal(), "starting closure should not be terminal");
+    expect(runtime.request_closure("leaf").empty(), "duplicate request should be idempotent");
+    expect(runtime.mark_ready("root") == std::vector<std::string>({"middle"}), "middle should unlock");
+    runtime.mark_starting("middle");
+    expect(runtime.state("middle") == dependency_runtime_state::starting, "mark_starting mismatch");
+    expect(runtime.mark_ready("middle") == std::vector<std::string>({"leaf"}), "leaf should unlock");
+    expect(runtime.mark_ready("leaf").empty() && runtime.all_terminal(), "ready closure should be terminal");
+
+    runtime.mark_pending("leaf");
+    expect(runtime.state("leaf") == dependency_runtime_state::pending && !runtime.all_terminal(),
+           "pending should be non-terminal");
+    runtime.mark_idle("leaf");
+    expect(runtime.state("leaf") == dependency_runtime_state::idle && runtime.all_terminal(),
+           "idle should clear requested state");
+    runtime.mark_starting("missing");
+    runtime.mark_pending("missing");
+    runtime.mark_idle("missing");
+    expect(runtime.state("missing") == dependency_runtime_state::idle,
+           "unknown runtime node should remain idle");
+    expect(runtime.blocked_by("missing").empty() && runtime.waiting_for("missing").empty(),
+           "unknown runtime queries should be empty");
+
+    runtime.reset(graph);
+    expect(runtime.request_all() == std::vector<std::string>({"side", "root"}),
+           "request_all should start every independent root");
+    expect(runtime.request_all().empty(), "repeated request_all should be idempotent");
+}
+
+void test_failure_propagation_and_recovery() {
+    using namespace pm_tiny;
+    dependency_graph graph;
+    dependency_error error;
+    expect(dependency_graph::build({node("a"), node("b"), node("left", {"a"}), node("right", {"b"}),
+                                    node("merge", {"left", "right"}), node("tail", {"merge"})},
+                                   graph, error), "failure graph should build");
+    dependency_runtime runtime(graph);
+    runtime.request_all();
+    auto failure = runtime.mark_failed("a");
+    expect(failure.failed == std::vector<std::string>({"a"}) &&
+           failure.blocked == std::vector<std::string>({"left", "merge", "tail"}),
+           "first failure should recursively block requested descendants");
+    runtime.mark_failed("b");
+    expect(runtime.blocked_by("tail") == std::vector<std::string>({"a", "b"}),
+           "recursive blocker roots should be stable and complete");
+    expect(runtime.waiting_for("tail") == std::vector<std::string>({"a", "b", "left", "right", "merge"}),
+           "recursive waiting set should be stable and complete");
+    expect(runtime.mark_ready("a") == std::vector<std::string>({"left"}),
+           "recovering one root should only unlock its branch");
+    runtime.mark_ready("left");
+    expect(runtime.state("merge") == dependency_runtime_state::blocked,
+           "merge must retain the other failure root");
+    expect(runtime.mark_ready("b") == std::vector<std::string>({"right"}), "right should recover");
+    expect(runtime.mark_ready("right") == std::vector<std::string>({"merge"}), "merge should recover once");
+    expect(runtime.mark_ready("merge") == std::vector<std::string>({"tail"}), "tail should recover");
 
     runtime.reset(graph);
     runtime.request_all();
-    runtime.mark_ready("root");
-    const auto failure = runtime.mark_failed("right");
-    expect(failure.blocked == std::vector<std::string>({"leaf"}), "failure should block only downstream");
-    expect(runtime.state("left") == dependency_runtime_state::starting, "sibling branch should continue");
+    runtime.mark_ready("a");
     runtime.mark_ready("left");
-    expect(runtime.mark_ready("right") == std::vector<std::string>({"leaf"}), "recovery should unlock downstream");
+    runtime.mark_ready("b");
+    runtime.mark_ready("right");
+    runtime.mark_ready("merge");
+    runtime.mark_ready("tail");
+    failure = runtime.mark_failed("a");
+    expect(failure.blocked.empty() && runtime.state("tail") == dependency_runtime_state::ready,
+           "online descendants must not be blocked when a dependency later exits");
+    expect(runtime.mark_failed("missing").failed.empty(), "unknown failure should be ignored");
+}
 
-    dependency_graph multi_graph;
-    expect(dependency_graph::build({node("a"), node("b"), node("leaf", {"a", "b"})},
-                                   multi_graph, error), "multi dependency graph should be valid");
-    runtime.reset(multi_graph);
-    runtime.request_all();
-    runtime.mark_failed("a");
-    runtime.mark_failed("b");
-    expect(runtime.mark_ready("a").empty() && runtime.state("leaf") == dependency_runtime_state::blocked,
-           "one recovered dependency must not clear another blocker");
-    expect(runtime.blocked_by("leaf") == std::vector<std::string>({"b"}), "remaining blocker mismatch");
-    expect(runtime.mark_ready("b") == std::vector<std::string>({"leaf"}), "all blockers recovered should unlock");
-
-    runtime.reset(multi_graph);
-    runtime.request_closure("leaf");
-    expect(runtime.waiting_for("leaf") == std::vector<std::string>({"a", "b"}),
-           "waiting dependency order mismatch");
-
-    runtime.mark_failed("a");
+void test_snapshot_migration_by_name() {
+    using namespace pm_tiny;
+    dependency_graph original;
+    dependency_graph changed;
+    dependency_error error;
+    expect(dependency_graph::build({node("remove"), node("alpha"), node("beta", {"alpha"})},
+                                   original, error), "original graph should build");
+    dependency_runtime runtime(original);
+    runtime.mark_ready("remove");
+    runtime.mark_starting("alpha");
+    runtime.mark_failed("beta");
     const auto snapshot = runtime.snapshot();
-    dependency_graph expanded;
-    expect(dependency_graph::build({node("a"), node("b"), node("leaf", {"a", "b"}), node("extra")},
-                                   expanded, error), "expanded graph should be valid");
-    runtime.migrate(expanded, snapshot);
-    expect(runtime.state("a") == dependency_runtime_state::failed,
-           "failed state should survive graph migration");
-    expect(runtime.state("leaf") == dependency_runtime_state::blocked,
-           "blocked state should survive graph migration");
-    expect(runtime.state("extra") == dependency_runtime_state::idle,
-           "new graph node should start idle");
 
-    dependency_graph peer_graph;
-    expect(dependency_graph::build({node("peer"), node("target")}, peer_graph, error),
-           "independent peer graph should be valid");
-    runtime.reset(peer_graph);
-    runtime.mark_pending("target");
-    const auto pending_snapshot = runtime.snapshot();
-    runtime.migrate(peer_graph, pending_snapshot);
-    expect(runtime.state("target") == dependency_runtime_state::pending,
-           "pending state should survive graph migration");
-    expect(runtime.mark_ready("peer") == std::vector<std::string>({"target"}),
-           "ready peer must return every newly startable process");
-    expect(runtime.state("target") == dependency_runtime_state::starting,
-           "returned process should transition to starting exactly once");
-    expect(runtime.mark_ready("peer").empty(), "ready peer must not return target twice");
+    expect(dependency_graph::build({node("beta"), node("added"), node("alpha", {"added"})},
+                                   changed, error), "changed graph should build");
+    runtime.migrate(changed, snapshot);
+    expect(runtime.state("beta") == dependency_runtime_state::failed,
+           "reordered node state should migrate by name");
+    expect(runtime.state("alpha") == dependency_runtime_state::starting,
+           "dependency changes must not move state by old index");
+    expect(runtime.state("added") == dependency_runtime_state::idle,
+           "new node should start idle");
+    expect(runtime.state("remove") == dependency_runtime_state::idle,
+           "deleted node should disappear");
 
-    dependency_graph invalid;
-    expect(!dependency_graph::build({node("a", {"missing"})}, invalid, error) &&
-           error.code == dependency_error_code::missing_dependency, "missing dependency should fail");
-    expect(!dependency_graph::build({node("a", {"a"})}, invalid, error) &&
-           error.code == dependency_error_code::self_dependency, "self dependency should fail");
-    expect(!dependency_graph::build({node("a", {"b", "b"}), node("b")}, invalid, error) &&
-           error.code == dependency_error_code::duplicate_dependency, "duplicate dependency should fail");
-    expect(!dependency_graph::build({node("a", {"b"}), node("b", {"c"}), node("c", {"a"})}, invalid, error) &&
-           error.cycle_path == std::vector<std::string>({"a", "b", "c", "a"}), "cycle path mismatch");
+    dependency_runtime empty_runtime;
+    expect(empty_runtime.snapshot().empty() && empty_runtime.state("anything") == dependency_runtime_state::idle,
+           "default runtime should be safe to inspect");
+}
+
+} // namespace
+
+int main() {
+    test_validation_and_atomic_build();
+    test_stable_orders_and_queries();
+    test_runtime_transitions_and_closure();
+    test_failure_propagation_and_recovery();
+    test_snapshot_migration_by_name();
     return 0;
 }

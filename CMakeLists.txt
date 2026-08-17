@@ -228,6 +228,7 @@ target_include_directories(pm_tiny_program_name PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 
 add_library(pm_tiny_lifecycle STATIC
         src/core/control_operation.cpp
+        src/core/lifecycle_orchestrator.cpp
         src/core/termination_job.cpp)
 target_include_directories(pm_tiny_lifecycle PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 
@@ -391,6 +392,8 @@ if (PM_TINY_ON_WINDOWS)
         target_link_libraries(termination_job_test PRIVATE pm_tiny_lifecycle)
         add_executable(control_operation_test tests/unit/control_operation_test.cpp)
         target_link_libraries(control_operation_test PRIVATE pm_tiny_lifecycle)
+        add_executable(lifecycle_orchestrator_test tests/unit/lifecycle_orchestrator_test.cpp)
+        target_link_libraries(lifecycle_orchestrator_test PRIVATE pm_tiny_lifecycle)
         add_executable(runtime_snapshot_test tests/unit/runtime_snapshot_test.cpp)
         target_link_libraries(runtime_snapshot_test PRIVATE pm_tiny_cli_output)
         add_executable(daemon_config_test tests/unit/daemon_config_test.cpp)
@@ -472,6 +475,7 @@ if (PM_TINY_BUILD_TESTS)
         add_test(NAME dependency_graph_test COMMAND dependency_graph_test)
         add_test(NAME termination_job_test COMMAND termination_job_test)
         add_test(NAME control_operation_test COMMAND control_operation_test)
+        add_test(NAME lifecycle_orchestrator_test COMMAND lifecycle_orchestrator_test)
         add_test(NAME runtime_snapshot_test COMMAND runtime_snapshot_test)
         add_test(NAME daemon_config_test COMMAND daemon_config_test)
         add_test(NAME program_log_test COMMAND program_log_test)
@@ -497,6 +501,8 @@ if (PM_TINY_BUILD_TESTS)
                 lifecycle-transitions windows-lifecycle 60 "integration;windows;lifecycle")
         pm_tiny_add_windows_protocol_test(windows_dependency_mutation_integration
                 dependency-mutations windows-dependency 60 "integration;windows;dependency")
+        pm_tiny_add_windows_protocol_test(windows_dependency_runtime_integration
+                dependency-runtime windows-dependency-runtime 60 "integration;windows;dependency")
         pm_tiny_add_windows_protocol_test(windows_concurrent_control_integration
                 concurrent-controls windows-concurrent 360 "integration;windows;concurrency")
         if (MSVC)

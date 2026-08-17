@@ -37,6 +37,13 @@ std::vector<pm_tiny::process_list_entry> fixture() {
     };
 }
 
+const nlohmann::json &find_node(const nlohmann::json &graph, const std::string &name) {
+    for (const auto &item : graph.at("nodes")) {
+        if (item.at("name") == name) return item;
+    }
+    throw std::runtime_error("node missing from rendered graph: " + name);
+}
+
 } // namespace
 
 int main() {
@@ -95,6 +102,12 @@ int main() {
     }
     expect(saw_external_cache, "focused graph should report dependencies outside the view");
 
+    focus_options.json = false;
+    const auto focused_text = render_dependency_graph(entries, focus_options);
+    expect(focused_text.find("Dependency graph: 4 nodes, 3 edges (focus: db)") != std::string::npos &&
+           focused_text.find("api [blocked; blocked_by=cache] <- db; external: cache") != std::string::npos,
+           "focused text should distinguish visible and external dependencies");
+
     dependency_graph_render_options dot_options;
     dot_options.dot = true;
     const auto dot = render_dependency_graph(entries, dot_options);
@@ -103,6 +116,38 @@ int main() {
            "DOT should use dependency-to-dependent edge direction");
     expect(dot.find("api\\nblocked\\nblocked_by: cache") != std::string::npos,
            "DOT labels should contain Graphviz newlines and blocked roots");
+
+    dot_options.focus = "db";
+    const auto focused_dot = render_dependency_graph(entries, dot_options);
+    expect(focused_dot.find("api\\nblocked\\nblocked_by: cache\\nexternal: cache") != std::string::npos,
+           "focused DOT should include external dependencies");
+
+    const auto multi_failure = nlohmann::json::parse(render_dependency_graph({
+        node("z_failure", PM_TINY_PROG_STATE_STARTUP_FAIL),
+        node("a_failure", PM_TINY_PROG_STATE_STARTUP_FAIL),
+        node("join", PM_TINY_PROG_STATE_BLOCKED, {"z_failure", "a_failure"}),
+        node("tail", PM_TINY_PROG_STATE_BLOCKED, {"join"}),
+    }, json_options));
+    expect(find_node(multi_failure, "tail").at("blocked_by") ==
+           nlohmann::json::array({"z_failure", "a_failure"}),
+           "multiple failure roots should use stable source order");
+
+    const std::vector<pm_tiny::process_list_entry> states = {
+        node("stopped", PM_TINY_PROG_STATE_STOPED),
+        node("online", PM_TINY_PROG_STATE_RUNING),
+        node("failed", PM_TINY_PROG_STATE_STARTUP_FAIL),
+        node("stopping", PM_TINY_PROG_STATE_REQUEST_STOP),
+        node("exited", PM_TINY_PROG_STATE_EXIT),
+        node("starting", PM_TINY_PROG_STATE_STARTING),
+        node("waiting", PM_TINY_PROG_STATE_WAITING_START),
+        node("deleting", PM_TINY_PROG_STATE_REQUEST_DELETE),
+        node("blocked", PM_TINY_PROG_STATE_BLOCKED),
+    };
+    const auto state_json = nlohmann::json::parse(render_dependency_graph(states, json_options));
+    for (const auto &entry : states) {
+        expect(find_node(state_json, entry.name).at("state") == pm_state_to_str(entry.state),
+               "every runtime state should render through the shared state mapping");
+    }
 
     expect(render_dependency_graph({}, text_options) == "Dependency graph: 0 nodes, 0 edges\n",
            "empty graph should be concise");
@@ -118,5 +163,25 @@ int main() {
         missing_failed = true;
     }
     expect(missing_failed, "missing focus should fail");
+
+    bool invalid_response_failed = false;
+    try {
+        (void) render_dependency_graph({node("broken", PM_TINY_PROG_STATE_BLOCKED, {"missing"})}, text_options);
+    } catch (const std::runtime_error &ex) {
+        invalid_response_failed = std::string(ex.what()) ==
+            "invalid dependency graph response: Program `broken` depends on missing `missing`";
+    }
+    expect(invalid_response_failed, "invalid graph response should report the stable validation error");
+
+    bool incompatible_formats_failed = false;
+    try {
+        dependency_graph_render_options incompatible;
+        incompatible.json = true;
+        incompatible.dot = true;
+        (void) render_dependency_graph(entries, incompatible);
+    } catch (const std::invalid_argument &) {
+        incompatible_formats_failed = true;
+    }
+    expect(incompatible_formats_failed, "JSON and DOT formats should remain mutually exclusive");
     return 0;
 }

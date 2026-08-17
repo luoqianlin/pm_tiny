@@ -16,6 +16,7 @@
   args: ["/c", "ping", "127.0.0.1", "-t"]
   cwd: .
   daemon: true
+  failure_action: restart
   restart_delay_ms: 2000
   log_mode: split
   log_max_size_kb: 4096

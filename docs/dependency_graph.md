@@ -29,6 +29,15 @@ reload 使用逆拓扑顺序。
 尚未启动的传递下游传播，独立旁支继续运行。失败依赖通过手动 start/restart 恢复并再次 ready 后，
 所有阻塞原因都消失的下游会自动继续启动。
 
+启动和心跳超时均服从 `failure_action`。启动超时的 `skip` 保留当前进程并将其视为 online，
+从而解锁下游；心跳超时的 `skip` 保留进程且不伪造 tick。`restart` 会等待当前 generation 的
+完整进程树退出，再按统一退避策略启动新 generation；尚未 online 的下游继续 waiting，已 online
+下游不会被反向停止。达到重启尝试上限时根节点进入 failed，待启动的传递下游进入 blocked。
+Linux/Android 继续支持 `reboot`，Windows 支持 `skip/restart` 并明确拒绝 `reboot`。
+
+普通进程意外退出是否自动重启仍由 `daemon` 控制，不由 `failure_action` 控制。两类自动重启共享
+`restart_delay_ms`、窗口、最大尝试次数和稳定运行重置策略；手动 start/restart 会清除抑制状态。
+
 `pm list` 和 `pm list --json` 会直接显示 `failed`/`blocked`。Windows `pm inspect` 还输出
 `dependency_state` 和 `blocked_by`；Linux/Android 的具体启动错误与依赖校验路径记录在 daemon 日志中。
 
@@ -48,8 +57,9 @@ JSON 输出的 `schema_version` 为 1，包含 `focus`、`nodes` 和 `edges`；�
 DOT 使用 `rankdir=LR`，只生成文本，不要求运行 pm 的设备安装 Graphviz。该功能不增加协议命令，
 支持进程列表 schema v3 的 daemon 均可直接使用。
 
-Android 实机回归可执行 `./scripts/test_android_dependency_graph.sh <adb-serial>`；脚本读取安装目录中的
-`bin/pm2`，并使用独立目录和
+Android 实机回归可执行
+`./scripts/test_android_dependency_graph.sh <adb-serial> [android-install-dir] [sdk-probe]`；脚本读取安装目录中的
+`bin/pm2` 和单独构建的 SDK probe，并使用独立目录和
 抽象 socket，不会停止或替换设备上已有的生产 pm_tiny，并会校验其 PID 在测试前后仍然存在。
 
 ## 运行时操作

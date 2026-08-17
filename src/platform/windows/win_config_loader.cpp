@@ -160,8 +160,9 @@ ConfigLoadResult load_program_configs(const std::string &program_config_path,
             result.programs.clear();
             return result;
         }
-        if (node["failure_action"] && base_cfg.failure_action != failure_action_t::SKIP) {
-            result.error_message = "Program `" + base_cfg.name + "` field `failure_action` is unsupported on Windows";
+        if (node["failure_action"] && base_cfg.failure_action == failure_action_t::REBOOT) {
+            result.error_message = "Program `" + base_cfg.name +
+                "` field `failure_action: reboot` is unsupported on Windows; supported values: skip, restart";
             result.programs.clear();
             return result;
         }

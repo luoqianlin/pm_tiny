@@ -281,6 +281,10 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
         dependency_graph_ = std::move(graph);
         dependency_runtime_.migrate(dependency_graph_, runtime_snapshot);
         const auto names = dependency_runtime_.request_closure(prog->name);
+        for (auto candidate_prog : pm_tiny_progs) {
+            if (dependency_runtime_.state(candidate_prog->name) == dependency_runtime_state::pending)
+                candidate_prog->state = PM_TINY_PROG_STATE_WAITING_START;
+        }
         auto start_progs = progs_from_names(names);
         const auto failures = spawn0(start_progs);
         if (!failures.empty()) {
@@ -316,7 +320,12 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             if (existing->state == PM_TINY_PROG_STATE_RUNING)
                 dependency_runtime_.mark_ready(existing->name);
         }
-        auto start_progs = progs_from_names(dependency_runtime_.request_closure(prog->name));
+        const auto names = dependency_runtime_.request_closure(prog->name);
+        for (auto candidate_prog : pm_tiny_progs) {
+            if (dependency_runtime_.state(candidate_prog->name) == dependency_runtime_state::pending)
+                candidate_prog->state = PM_TINY_PROG_STATE_WAITING_START;
+        }
+        auto start_progs = progs_from_names(names);
         auto failures = spawn0(start_progs);
         return failures.empty() ? 0 : -1;
     }
@@ -669,6 +678,7 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
                 launch.release_parent_streams(prog.rpipefd[0], unused_stderr);
             }
             prog.last_startup_ms = pm_tiny::time::gettime_monotonic_ms();
+            prog.heartbeat_action_due_ms = 0;
             if (lmkdFd) {
                 lmk_procprio(this->lmkdFd.fd_, pid, get_uid_by_pid(pid), prog.oom_score_adj);
             }
@@ -841,7 +851,20 @@ bool pm_tiny_server_t::init_process_tree(const std::string &mode, const std::str
             return;
         }
         this->server_exit = 1;
-        for (auto prog: this->pm_tiny_progs) {
+        std::vector<prog_ptr_t> stop_order;
+        stop_order.reserve(this->pm_tiny_progs.size());
+        for (const auto id : dependency_graph_.reverse_topological_order()) {
+            auto prog = find_prog(dependency_graph_.name(id));
+            if (prog != nullptr) stop_order.push_back(prog);
+        }
+        // A valid runtime graph contains every program. Keep a defensive fallback for
+        // partially initialized shutdown paths so no managed process is skipped.
+        for (auto prog : this->pm_tiny_progs) {
+            if (std::find(stop_order.begin(), stop_order.end(), prog) == stop_order.end())
+                stop_order.push_back(prog);
+        }
+        for (auto prog : stop_order) {
+            PM_TINY_DLOG_INFO("dependency shutdown request `%s`", prog->name.c_str());
             prog->reset_restart_policy();
             if (prog->instance.pid != -1) {
                 prog->async_kill_prog();

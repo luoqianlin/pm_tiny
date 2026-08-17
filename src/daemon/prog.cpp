@@ -278,17 +278,6 @@ namespace pm_tiny {
         return s_buff;
     }
 
-    bool prog_info_t::is_start_timeout() const {
-        auto t = start_timeout;
-        if (t < 0)return false;
-        return (pm_tiny::time::gettime_monotonic_ms() - last_startup_ms) >= t * 1000;
-    }
-
-    bool prog_info_t::is_tick_timeout() const {
-        if (heartbeat_timeout <= 0)return false;
-        return time::gettime_monotonic_ms() - last_tick_timepoint >= heartbeat_timeout * 1000;
-    }
-
     void prog_info_t::async_force_kill() {
         if (instance.job.force(instance.generation) == termination_action::send_kill) {
             instance.termination = instance.job.phase();
