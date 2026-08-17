@@ -165,8 +165,10 @@ function Test-ReleaseHealth([string]$ReleaseDir, [string]$Tag) {
         } while ([DateTime]::UtcNow -lt $deadline)
         return $false
     } finally {
-        & $client quit *> $null
-        if ($process -and -not $process.WaitForExit(5000)) { Stop-Process -Id $process.Id -Force }
+        if ($process -and -not $process.HasExited) {
+            try { & $client quit *> $null } catch { }
+            if (-not $process.WaitForExit(5000)) { Stop-Process -Id $process.Id -Force }
+        }
         $env:PM_TINY_HOME = $oldHome
         $env:PM_TINY_PIPE_NAME = $oldPipe
         Remove-Item -LiteralPath $healthRoot -Recurse -Force -ErrorAction SilentlyContinue
