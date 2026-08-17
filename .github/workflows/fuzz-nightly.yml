@@ -42,6 +42,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: afl-nightly
-          path: build/test-artifacts/fuzz/afl-nightly
+          path: build/test-artifacts/fuzz/afl-nightly/*.tar.gz
           if-no-files-found: warn
           retention-days: 30

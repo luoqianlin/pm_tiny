@@ -17,6 +17,7 @@ esac
 RUN_TAG=$(date +%Y%m%d-%H%M%S)-$$
 ARTIFACT_ROOT=${PM_TINY_FUZZ_ARTIFACT_DIR:-"$ROOT/build/test-artifacts/fuzz/$RUN_TAG"}
 mkdir -p "$ARTIFACT_ROOT"
+ARTIFACT_ROOT=$(cd "$ARTIFACT_ROOT" && pwd)
 
 run_libfuzzer() {
     command -v clang++ >/dev/null || { echo 'missing clang++' >&2; return 1; }
@@ -58,6 +59,8 @@ run_afl() {
         AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
             afl-fuzz -V "$DURATION" -i "$ROOT/tests/fuzz/corpus/$subject" -o "$output" -- \
             "$build/tests/fuzz/pm_tiny_afl_$subject" @@
+        tar -czf "$ARTIFACT_ROOT/afl-$subject.tar.gz" \
+            -C "$ARTIFACT_ROOT" "afl-$subject"
         if find "$output" -path '*/crashes/id:*' -type f -print -quit | grep -q .; then
             echo "AFL++ found a crash for $subject" >&2
             return 1

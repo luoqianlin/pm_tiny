@@ -58,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install LLVM coverage tools
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
       - name: Build, test, and report coverage
         env:
           PM_TINY_BUILD_JOBS: "2"
@@ -107,7 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: afl-smoke
-          path: build/test-artifacts/fuzz/afl
+          path: build/test-artifacts/fuzz/afl/*.tar.gz
           if-no-files-found: warn
           retention-days: 14
 
