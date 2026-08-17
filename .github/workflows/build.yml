@@ -130,11 +130,12 @@ jobs:
         run: '"$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;25.1.8937393"'
       - name: Build Android Release inputs
         env:
-          PM_TINY_ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/25.1.8937393
           PM_TINY_ANDROID_RELEASE_BUILD_DIR: ${{ github.workspace }}/build-android
           PM_TINY_ANDROID_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/build-android/release-bin
           PM_TINY_BUILD_JOBS: "2"
-        run: bash scripts/release/build-android-release.sh
+        run: >-
+          PM_TINY_ANDROID_NDK="$ANDROID_SDK_ROOT/ndk/25.1.8937393"
+          bash scripts/release/build-android-release.sh
       - name: Verify Android artifacts
         run: |
           test -x build-android/release-bin/pm_tiny
