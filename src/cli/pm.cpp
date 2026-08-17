@@ -43,6 +43,18 @@ bool executable_file(const std::string &path) {
     return stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) && access(path.c_str(), X_OK) == 0;
 }
 
+std::string absolute_path_preserving_leaf(const std::string &path) {
+    const auto separator = path.find_last_of('/');
+    const std::string directory = separator == std::string::npos ? "." : path.substr(0, separator);
+    const std::string leaf = separator == std::string::npos ? path : path.substr(separator + 1);
+    char resolved_directory[PATH_MAX];
+    if (leaf.empty() || realpath(directory.empty() ? "/" : directory.c_str(), resolved_directory) == nullptr) {
+        throw std::runtime_error(std::string("resolve executable `") + path + "`: " + std::strerror(errno));
+    }
+    return std::string(resolved_directory) +
+           (std::strcmp(resolved_directory, "/") == 0 ? "" : "/") + leaf;
+}
+
 std::string resolve_start_executable(const std::string &input, const std::string &cwd) {
     if (input.empty()) throw std::runtime_error("resolve executable: empty path");
     if (input.find('/') != std::string::npos) {
@@ -50,12 +62,13 @@ std::string resolve_start_executable(const std::string &input, const std::string
         const auto resolved = absolute_existing_path(candidate, "executable");
         if (!executable_file(resolved))
             throw std::runtime_error("resolve executable `" + input + "`: file is not executable");
-        return resolved;
+        return absolute_path_preserving_leaf(candidate);
     }
 
     char cwd_resolved[PATH_MAX];
-    if (realpath((cwd + "/" + input).c_str(), cwd_resolved) != nullptr && executable_file(cwd_resolved))
-        return cwd_resolved;
+    const std::string cwd_candidate = cwd + "/" + input;
+    if (realpath(cwd_candidate.c_str(), cwd_resolved) != nullptr && executable_file(cwd_resolved))
+        return absolute_path_preserving_leaf(cwd_candidate);
 
     const char *path_env = std::getenv("PATH");
     std::string path_list = path_env == nullptr ? std::string() : path_env;
@@ -65,7 +78,8 @@ std::string resolve_start_executable(const std::string &input, const std::string
         const auto directory = path_list.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
         const std::string candidate = (directory.empty() ? std::string(".") : directory) + "/" + input;
         char resolved[PATH_MAX];
-        if (realpath(candidate.c_str(), resolved) != nullptr && executable_file(resolved)) return resolved;
+        if (realpath(candidate.c_str(), resolved) != nullptr && executable_file(resolved))
+            return absolute_path_preserving_leaf(candidate);
         if (end == std::string::npos) break;
         begin = end + 1;
     }
