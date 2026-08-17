@@ -29,7 +29,12 @@ $daemonVersion = (& (Join-Path $OutputDir "pm_tiny.exe") --version 2>&1 | Out-St
 if ($LASTEXITCODE -ne 0 -or -not $daemonVersion.Contains("pm_tiny $version")) {
     throw "Windows Release version mismatch: $daemonVersion"
 }
-$compiler = (& cmd.exe /d /s /c '""%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property catalog_productDisplayVersion"' 2>&1 | Out-String).Trim()
+$vswhere = Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path -LiteralPath $vswhere)) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+}
+if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe was not found" }
+$compiler = (& $vswhere -latest -products "*" -property catalog_productDisplayVersion | Out-String).Trim()
 @("toolchain=VS 2022/MSVC", "visual_studio=$compiler") |
     Set-Content -LiteralPath (Join-Path $OutputDir "toolchain.txt") -Encoding ASCII
 Write-Output "windows release binaries: $OutputDir"
