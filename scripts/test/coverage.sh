@@ -19,6 +19,8 @@ cmake -S "$ROOT" -B "$BUILD_DIR" \
     -DPM_TINY_SANITIZER_ENABLE=OFF \
     -DFETCHCONTENT_FULLY_DISCONNECTED=ON
 cmake --build "$BUILD_DIR" --parallel "${PM_TINY_BUILD_JOBS:-4}"
+BUILD_DIR=$(cd "$BUILD_DIR" && pwd)
+PROFILE_DIR="$BUILD_DIR/profiles"
 rm -rf "$PROFILE_DIR" "$ARTIFACT_DIR"
 mkdir -p "$PROFILE_DIR" "$ARTIFACT_DIR/html"
 LLVM_PROFILE_FILE="$PROFILE_DIR/%p-%m.profraw" \
@@ -31,13 +33,22 @@ mapfile -t OBJECTS < <(find "$BUILD_DIR" -type f -perm -111 -print0 | \
 OBJECT_ARGS=()
 for object in "${OBJECTS[@]:1}"; do OBJECT_ARGS+=("-object=$object"); done
 IGNORE='(^|/)(dependencies|tests)(/|$)'
+BUILD_NAME=$(basename "$BUILD_DIR")
+PATH_EQUIVALENCE=(
+    "--path-equivalence=$BUILD_NAME/sdk,$ROOT"
+    "--path-equivalence=$BUILD_NAME/src,$ROOT/src"
+    "--path-equivalence=$BUILD_DIR/sdk,$ROOT"
+    "--path-equivalence=$BUILD_DIR/src,$ROOT/src"
+)
 llvm-cov report "${OBJECTS[0]}" "${OBJECT_ARGS[@]}" \
     -instr-profile="$ARTIFACT_DIR/coverage.profdata" \
-    -ignore-filename-regex="$IGNORE" | tee "$ARTIFACT_DIR/summary.txt"
+    -ignore-filename-regex="$IGNORE" "${PATH_EQUIVALENCE[@]}" | tee "$ARTIFACT_DIR/summary.txt"
 llvm-cov show "${OBJECTS[0]}" "${OBJECT_ARGS[@]}" \
     -instr-profile="$ARTIFACT_DIR/coverage.profdata" \
-    -ignore-filename-regex="$IGNORE" -format=html -output-dir="$ARTIFACT_DIR/html"
+    -ignore-filename-regex="$IGNORE" "${PATH_EQUIVALENCE[@]}" \
+    -format=html -output-dir="$ARTIFACT_DIR/html"
 llvm-cov export "${OBJECTS[0]}" "${OBJECT_ARGS[@]}" \
     -instr-profile="$ARTIFACT_DIR/coverage.profdata" \
-    -ignore-filename-regex="$IGNORE" -format=lcov > "$ARTIFACT_DIR/coverage.lcov"
+    -ignore-filename-regex="$IGNORE" "${PATH_EQUIVALENCE[@]}" \
+    -format=lcov > "$ARTIFACT_DIR/coverage.lcov"
 echo "coverage artifacts: $ARTIFACT_DIR"

@@ -146,7 +146,7 @@ if (Test-Path -LiteralPath $Journal) {
 }
 
 function Test-ReleaseHealth([string]$ReleaseDir, [string]$Tag) {
-    $healthRoot = Join-Path $State ("health-{0}-{1}-{2}" -f $Tag, $PID, [Guid]::NewGuid().ToString('N'))
+    $healthRoot = Join-Path ([IO.Path]::GetTempPath()) ("pm-tiny-health-{0}-{1}-{2}" -f $Tag, $PID, [Guid]::NewGuid().ToString('N'))
     $healthPipe = "\\.\pipe\pm_tiny-release-$ServiceName-$PID-$Tag"
     $daemon = Join-Path $ReleaseDir "pm_tiny.exe"
     $client = Join-Path $ReleaseDir "pm.exe"
@@ -159,21 +159,38 @@ function Test-ReleaseHealth([string]$ReleaseDir, [string]$Tag) {
     $oldHome = $env:PM_TINY_HOME
     $oldPipe = $env:PM_TINY_PIPE_NAME
     $process = $null
+    $lastResult = $null
+    $stdoutPath = Join-Path $healthRoot "daemon.stdout.log"
+    $stderrPath = Join-Path $healthRoot "daemon.stderr.log"
     try {
         $env:PM_TINY_HOME = $healthRoot
         $env:PM_TINY_PIPE_NAME = $healthPipe
         $arguments = '--home "' + $healthRoot + '" --config "' + $healthConfig + '" --pipe-name "' + $healthPipe + '"'
-        $process = Start-Process -FilePath $daemon -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        $process = Start-Process -FilePath $daemon -ArgumentList $arguments -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         do {
-            $result = Invoke-ClientInfo $client
-            if ($result.ExitCode -eq 0) {
-                $info = $result.Output | ConvertFrom-Json
+            $lastResult = Invoke-ClientInfo $client
+            if ($lastResult.ExitCode -eq 0) {
+                $info = $lastResult.Output | ConvertFrom-Json
                 if ($info.identity.protocol_version -eq 3 -and $info.runtime.state -eq "running") { return $true }
             }
             if ($process.HasExited) { break }
             Start-Sleep -Milliseconds 100
         } while ([DateTime]::UtcNow -lt $deadline)
+        $process.Refresh()
+        $processId = if ($process) { [string]$process.Id } else { "none" }
+        $processExit = "running"
+        if ($process.HasExited) { $processExit = [string]$process.ExitCode }
+        $clientExit = if ($lastResult) { [string]$lastResult.ExitCode } else { "not-run" }
+        $clientOutput = if ($lastResult) { $lastResult.Output.Trim() } else { "" }
+        $daemonLog = Join-Path $healthRoot "daemon.log"
+        $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+            (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue).Trim()
+        } else { "<missing>" }
+        Write-Host ("release health diagnostics: process_id=$processId process_exit=$processExit " +
+            "client_exit=$clientExit daemon_log_exists=$(Test-Path -LiteralPath $daemonLog) " +
+            "client_output=[$clientOutput] stderr=[$stderrText]")
         return $false
     } finally {
         if ($process -and -not $process.HasExited) {

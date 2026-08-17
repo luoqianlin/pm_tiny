@@ -21,6 +21,7 @@ All notable changes to PM_Tiny are documented in this file.
 
 - Stop cancels pending restarts, interrupted or stopped processes can be restarted reliably, and stale generations cannot complete newer requests.
 - Windows rejects deletion of a process that is still required by another configured process and keeps log streams isolated across rapid restarts.
+- Windows release health checks use short system temporary roots, avoiding legacy `MAX_PATH` failures in deep worktrees.
 
 [4.1.0]: https://github.com/luoqianlin/pm_tiny/compare/v4.0.0...v4.1.0
 
