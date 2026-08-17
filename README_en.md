@@ -124,7 +124,7 @@ VS 2022/MSVC x64.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPM_TINY_BUILD_TESTS=ON
 cmake --build build
-ctest --test-dir build --output-on-failure
+cmake -E chdir build ctest --output-on-failure
 cmake --install build
 ```
 

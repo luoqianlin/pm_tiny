@@ -22,7 +22,7 @@ cmake --build "$BUILD_DIR" --parallel "${PM_TINY_BUILD_JOBS:-4}"
 rm -rf "$PROFILE_DIR" "$ARTIFACT_DIR"
 mkdir -p "$PROFILE_DIR" "$ARTIFACT_DIR/html"
 LLVM_PROFILE_FILE="$PROFILE_DIR/%p-%m.profraw" \
-    ctest --test-dir "$BUILD_DIR" --output-on-failure
+    cmake -E chdir "$BUILD_DIR" ctest --output-on-failure
 llvm-profdata merge -sparse "$PROFILE_DIR"/*.profraw -o "$ARTIFACT_DIR/coverage.profdata"
 
 mapfile -t OBJECTS < <(find "$BUILD_DIR" -type f -perm -111 -print0 | \

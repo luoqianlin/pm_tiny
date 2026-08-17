@@ -16,7 +16,7 @@ Linux:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPM_TINY_BUILD_TESTS=ON
 cmake --build build -j4
-ctest --test-dir build --output-on-failure
+cmake -E chdir build ctest --output-on-failure
 ```
 
 Windows changes must also pass the VS 2022/MSVC x64 test suite. Android changes must build with the NDK; process lifecycle changes should run the isolated device regression scripts with an explicit ADB serial.

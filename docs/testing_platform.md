@@ -10,7 +10,7 @@ Linux 完整回归：
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPM_TINY_BUILD_TESTS=ON
 cmake --build build --parallel 4
-ctest --test-dir build --output-on-failure
+cmake -E chdir build ctest --output-on-failure
 ```
 
 `posix_runtime_integration` 使用真实 PTY 验证三个标准流的 tty 属性，并按 1 KiB 边界验证 split 日志

@@ -139,7 +139,7 @@ Windows 验证使用 VS 2022/MSVC x64 Release 构建。在 VS 2022 x64 Developer
 ```powershell
 cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 -DPM_TINY_BUILD_TESTS=ON
 cmake --build build-msvc --config Release --parallel 4
-ctest --test-dir build-msvc -C Release --output-on-failure
+cmake -E chdir build-msvc ctest -C Release --output-on-failure
 ```
 
 完整 CTest 必须包含 `windows_protocol_integration`、`windows_lifecycle_transition_integration`、
@@ -167,7 +167,7 @@ Test-Path .\build-msvc\Release\pm2.exe
 Windows 构建后运行：
 
 ```powershell
-ctest --test-dir build-msvc -C Release --output-on-failure
+cmake -E chdir build-msvc ctest -C Release --output-on-failure
 ```
 
 `windows_protocol_integration` 在独立临时目录和唯一命名管道中启动 daemon，覆盖 `list/graph/stop/start/save/delete/restart/version/log/ready/tick/inspect/info/reload/quit`。测试还会验证依赖图文本/JSON/DOT、日志流、依赖拓扑顺序、空配置保存和 reload、start/heartbeat timeout、异常帧恢复、崩溃循环抑制及手动恢复、100 个进程且 daemon 线程数不线性增长、1000 次真实请求后句柄和 Private Bytes 不线性增长、慢日志客户端独立断开、`pm log` Ctrl+C 返回 130，以及 CTRL_BREAK 优雅退出、超时强杀、根进程先退出、完整后代清理和快速连续重启。生命周期迁移、依赖变更和并发控制使用独立 CTest 项及产物目录，便于执行 `ctest --repeat until-fail:10 -R "(lifecycle_transition|dependency_mutation|concurrent_control)"`。失败现场保留在 `build-msvc/test-artifacts/windows*`。
